@@ -1,0 +1,14 @@
+tracker_type: botsort
+track_high_thresh: 0.22
+track_low_thresh: 0.06
+new_track_thresh: 0.35
+track_buffer: 120
+match_thresh: 0.82
+fuse_score: True
+
+gmc_method: none
+
+proximity_thresh: 0.45
+appearance_thresh: 0.78
+with_reid: True
+model: auto
