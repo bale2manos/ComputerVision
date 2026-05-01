@@ -20,11 +20,21 @@ from basketball_cv.events import (
 
 @dataclass
 class EnhancedBallOwnershipConfig(BallOwnershipConfig):
-    """Temporal possession configuration for render/debug workflows."""
+    """Temporal possession configuration for render/debug workflows.
+
+    Important: court coordinates come from a homography fitted on the floor. A
+    ball held above the floor can project several metres away in the minimap. For
+    possession, image-space contact with the player's upper body/hands therefore
+    has to override raw court distance when it is strong.
+    """
 
     short_occlusion_hold_s: float = 0.35
     owner_switch_margin: float = 0.18
     debug_candidate_count: int = 3
+    strong_image_contact: float = 0.62
+    image_contact_bonus: float = 1.25
+    image_contact_confidence_weight: float = 0.72
+    contact_override_max_court_distance_m: float = 7.5
 
 
 def assign_enhanced_ball_ownership(
@@ -59,6 +69,7 @@ def assign_enhanced_ball_ownership(
     loose_ball_frames = 0
     flight_ball_frames = 0
     held_without_ball_frames = 0
+    image_contact_owned_frames = 0
 
     for frame in sorted(by_frame):
         frame_records = by_frame[frame]
@@ -117,6 +128,8 @@ def assign_enhanced_ball_ownership(
             continue
 
         attach_owner_fields(ball, owner, owner_id, previous_owner, previous_team, config)
+        if float(ball.get("ball_owner_image_contact") or 0.0) >= config.strong_image_contact:
+            image_contact_owned_frames += 1
         owner_counts[owner_id] += 1
         owned_ball_frames += 1
         previous_owner = owner_id
@@ -129,6 +142,7 @@ def assign_enhanced_ball_ownership(
         "loose_ball_frames": loose_ball_frames,
         "flight_ball_frames": flight_ball_frames,
         "held_without_ball_frames": held_without_ball_frames,
+        "image_contact_owned_frames": image_contact_owned_frames,
         "unique_owners": len(owner_counts),
         "owner_frame_counts": {str(k): int(v) for k, v in sorted(owner_counts.items())},
         "parameters": {
@@ -136,6 +150,9 @@ def assign_enhanced_ball_ownership(
             "keep_owner_radius_m": config.keep_owner_radius_m,
             "short_occlusion_hold_s": config.short_occlusion_hold_s,
             "owner_switch_margin": config.owner_switch_margin,
+            "strong_image_contact": config.strong_image_contact,
+            "image_contact_bonus": config.image_contact_bonus,
+            "contact_override_max_court_distance_m": config.contact_override_max_court_distance_m,
             "min_owner_confidence": config.min_owner_confidence,
         },
     }
@@ -153,11 +170,15 @@ def clear_possession_fields(rec: dict[str, Any]) -> None:
         "ball_owner_confidence",
         "ball_owner_source",
         "ball_owner_image_overlap",
+        "ball_owner_image_contact",
+        "ball_owner_assignment_reason",
         "ball_owner_score",
         "ball_source_reliability",
         "owner_candidates",
         "ball_missing_frames",
         "possession_hold_reason",
+        "possession_court_x",
+        "possession_court_y",
     ):
         rec.pop(key, None)
 
@@ -186,30 +207,44 @@ def choose_temporal_owner(
     if not players:
         return None
 
-    ranked = sorted(players, key=lambda player: _ownership_score(ball, player, previous_owner, previous_team, config))
+    ranked = sorted(players, key=lambda player: enhanced_ownership_score(ball, player, previous_owner, previous_team, config))
     best = ranked[0]
     best_owner_id = _player_key(best)
     best_distance = _distance(ball, best)
+    best_contact = ball_player_image_contact(ball, best)
 
     if previous_owner is not None and best_owner_id != previous_owner:
         previous_candidates = [player for player in players if _player_key(player) == previous_owner]
         if previous_candidates:
             previous = previous_candidates[0]
             previous_distance = _distance(ball, previous)
-            previous_score = _ownership_score(ball, previous, previous_owner, previous_team, config)
-            best_score = _ownership_score(ball, best, previous_owner, previous_team, config)
-            if previous_distance <= config.keep_owner_radius_m and best_score > previous_score - config.owner_switch_margin:
+            previous_score = enhanced_ownership_score(ball, previous, previous_owner, previous_team, config)
+            best_score = enhanced_ownership_score(ball, best, previous_owner, previous_team, config)
+            previous_contact = ball_player_image_contact(ball, previous)
+            if previous_contact >= config.strong_image_contact and best_contact < previous_contact + 0.12:
                 best = previous
                 best_distance = previous_distance
+                best_contact = previous_contact
                 best_owner_id = previous_owner
+            elif previous_distance <= config.keep_owner_radius_m and best_score > previous_score - config.owner_switch_margin:
+                best = previous
+                best_distance = previous_distance
+                best_contact = previous_contact
+                best_owner_id = previous_owner
+
+    score = enhanced_ownership_score(ball, best, previous_owner, previous_team, config)
+    confidence = ownership_confidence(best_distance, score, config, ball, best_contact)
+
+    if best_contact >= config.strong_image_contact:
+        # A ball inside/next to the upper body or hands should count as possession
+        # even if its floor-plane projection is displaced by perspective.
+        if best_distance <= config.contact_override_max_court_distance_m or _ball_player_overlap_fraction(ball, best) > 0.02:
+            return best if confidence >= max(0.25, config.min_owner_confidence * 0.75) else None
 
     radius = config.keep_owner_radius_m if previous_owner is not None and best_owner_id == previous_owner else config.possession_radius_m
     overlap = _ball_player_overlap_fraction(ball, best)
     if best_distance > radius and overlap <= 0.08:
         return None
-
-    score = _ownership_score(ball, best, previous_owner, previous_team, config)
-    confidence = ownership_confidence(best_distance, score, config, ball)
     if confidence < config.min_owner_confidence:
         return None
     return best
@@ -224,9 +259,11 @@ def attach_owner_fields(
     config: EnhancedBallOwnershipConfig,
 ) -> None:
     distance_m = _distance(ball, owner)
-    score = _ownership_score(ball, owner, previous_owner, previous_team, config)
-    confidence = ownership_confidence(distance_m, score, config, ball)
+    contact = ball_player_image_contact(ball, owner)
+    score = enhanced_ownership_score(ball, owner, previous_owner, previous_team, config)
+    confidence = ownership_confidence(distance_m, score, config, ball, contact)
     identity = _record_identity(owner)
+    assignment_reason = "image_contact" if contact >= config.strong_image_contact else "court_distance"
 
     ball["ball_state"] = "owned"
     ball["ball_owner_player_id"] = owner_id
@@ -235,8 +272,16 @@ def attach_owner_fields(
     ball["ball_owner_team"] = owner.get("team")
     ball["ball_owner_distance_m"] = round(float(distance_m), 3)
     ball["ball_owner_image_overlap"] = round(float(_ball_player_overlap_fraction(ball, owner)), 3)
+    ball["ball_owner_image_contact"] = round(float(contact), 3)
     ball["ball_owner_score"] = round(float(score), 3)
     ball["ball_owner_confidence"] = round(float(confidence), 3)
+    ball["ball_owner_assignment_reason"] = assignment_reason
+    if owner.get("court_x") is not None and owner.get("court_y") is not None:
+        # Minimap/render coordinate for a possessed elevated ball. The raw ball
+        # court_x/court_y is still kept for debugging, but possession_court_* is
+        # what should be shown tactically.
+        ball["possession_court_x"] = owner.get("court_x")
+        ball["possession_court_y"] = owner.get("court_y")
 
     owner["has_ball"] = True
     owner["ball_state"] = "owned"
@@ -245,8 +290,85 @@ def attach_owner_fields(
     owner["ball_owner_jersey_number"] = owner.get("jersey_number")
     owner["ball_owner_team"] = owner.get("team")
     owner["ball_owner_distance_m"] = round(float(distance_m), 3)
+    owner["ball_owner_image_contact"] = round(float(contact), 3)
     owner["ball_owner_confidence"] = round(float(confidence), 3)
+    owner["ball_owner_assignment_reason"] = assignment_reason
     owner["ball_owner_source"] = ball.get("source")
+
+
+def enhanced_ownership_score(
+    ball: dict[str, Any],
+    player: dict[str, Any],
+    previous_owner: int | None,
+    previous_team: str | None,
+    config: EnhancedBallOwnershipConfig,
+) -> float:
+    base = _ownership_score(ball, player, previous_owner, previous_team, config)
+    contact = ball_player_image_contact(ball, player)
+    overlap = _ball_player_overlap_fraction(ball, player)
+    score = base - config.image_contact_bonus * contact - 0.45 * min(1.0, overlap * 4.0)
+    if previous_owner is not None and _player_key(player) == previous_owner and contact > 0.35:
+        score -= 0.22
+    return float(score)
+
+
+def ball_player_image_contact(ball: dict[str, Any], player: dict[str, Any]) -> float:
+    """Estimate if the detected ball is visually in a player's hands/upper body.
+
+    This intentionally works in image coordinates, not court coordinates, because
+    homography projection is invalid for an elevated ball.
+    """
+
+    ball_box = ball.get("bbox")
+    player_box = player.get("bbox")
+    if not isinstance(ball_box, list) or not isinstance(player_box, list):
+        return 0.0
+    bx1, by1, bx2, by2 = [float(v) for v in ball_box]
+    px1, py1, px2, py2 = [float(v) for v in player_box]
+    pw = max(px2 - px1, 1.0)
+    ph = max(py2 - py1, 1.0)
+    bc_x = (bx1 + bx2) / 2.0
+    bc_y = (by1 + by2) / 2.0
+    ball_size = max(bx2 - bx1, by2 - by1, 1.0)
+
+    expanded_x1 = px1 - 0.30 * pw
+    expanded_x2 = px2 + 0.30 * pw
+    expanded_y1 = py1 - 0.34 * ph
+    expanded_y2 = py2 + 0.08 * ph
+    vertical = (bc_y - py1) / ph
+    horizontal_inside = expanded_x1 <= bc_x <= expanded_x2
+    vertical_inside = expanded_y1 <= bc_y <= expanded_y2
+
+    contact = 0.0
+    if horizontal_inside and vertical_inside:
+        if -0.25 <= vertical <= 0.68:
+            contact = 0.88
+        elif -0.40 <= vertical <= 0.85:
+            contact = 0.62
+        else:
+            contact = 0.38
+
+    # Ball center in original player box is a very strong signal, even if it is
+    # above the torso/head due to a shot/pass gather.
+    if px1 <= bc_x <= px2 and py1 - 0.18 * ph <= bc_y <= py1 + 0.72 * ph:
+        contact = max(contact, 0.96)
+
+    # Near-hands/arms: horizontally close and vertically in the upper 75%.
+    nearest_x = min(max(bc_x, px1), px2)
+    nearest_y = min(max(bc_y, py1 - 0.18 * ph), py2)
+    normalized_dist = float(np.hypot(bc_x - nearest_x, bc_y - nearest_y)) / max(0.35 * ph, 0.65 * pw, ball_size, 1.0)
+    if normalized_dist < 1.0 and vertical <= 0.82:
+        contact = max(contact, 1.0 - normalized_dist * 0.42)
+
+    overlap = _ball_player_overlap_fraction(ball, player)
+    if overlap > 0:
+        contact = max(contact, min(1.0, 0.48 + overlap * 4.0))
+
+    # Ball below the waist is less reliable for possession because it can be on
+    # the floor or visually overlapping a leg.
+    if vertical > 0.72:
+        contact *= 0.65
+    return float(max(0.0, min(1.0, contact)))
 
 
 def rank_owner_candidates(
@@ -256,11 +378,12 @@ def rank_owner_candidates(
     previous_team: str | None,
     config: EnhancedBallOwnershipConfig,
 ) -> list[dict[str, Any]]:
-    ranked = sorted(players, key=lambda player: _ownership_score(ball, player, previous_owner, previous_team, config))
+    ranked = sorted(players, key=lambda player: enhanced_ownership_score(ball, player, previous_owner, previous_team, config))
     output = []
     for player in ranked:
         distance = _distance(ball, player)
-        score = _ownership_score(ball, player, previous_owner, previous_team, config)
+        contact = ball_player_image_contact(ball, player)
+        score = enhanced_ownership_score(ball, player, previous_owner, previous_team, config)
         output.append(
             {
                 "player_id": _player_key(player),
@@ -269,9 +392,10 @@ def rank_owner_candidates(
                 "team": player.get("team"),
                 "distance_m": round(float(distance), 3),
                 "image_distance": round(float(_ball_player_image_distance(ball, player)), 3),
+                "image_contact": round(float(contact), 3),
                 "overlap": round(float(_ball_player_overlap_fraction(ball, player)), 3),
                 "score": round(float(score), 3),
-                "confidence": round(float(ownership_confidence(distance, score, config, ball)), 3),
+                "confidence": round(float(ownership_confidence(distance, score, config, ball, contact)), 3),
                 "was_previous_owner": bool(previous_owner is not None and _player_key(player) == previous_owner),
             }
         )
@@ -326,10 +450,14 @@ def ownership_confidence(
     score: float,
     config: EnhancedBallOwnershipConfig,
     ball: dict[str, Any] | None = None,
+    image_contact: float = 0.0,
 ) -> float:
     distance_conf = 1.0 - distance_m / max(config.keep_owner_radius_m, 1e-6)
     score_conf = 1.0 - max(score, 0.0) / 2.0
-    return max(0.0, min(1.0, (0.55 * distance_conf + 0.45 * score_conf) * ball_source_reliability(ball)))
+    court_conf = max(0.0, min(1.0, 0.55 * distance_conf + 0.45 * score_conf))
+    contact_conf = max(0.0, min(1.0, image_contact * config.image_contact_confidence_weight + 0.18))
+    reliability = ball_source_reliability(ball)
+    return max(0.0, min(1.0, max(court_conf, contact_conf) * reliability))
 
 
 def ball_source_reliability(ball: dict[str, Any] | None) -> float:
@@ -371,6 +499,8 @@ def best_possession_for_frame(records: list[dict[str, Any]]) -> dict[str, Any]:
             "team": owner.get("ball_owner_team") or owner.get("team"),
             "confidence": owner.get("ball_owner_confidence"),
             "distance_m": owner.get("ball_owner_distance_m"),
+            "image_contact": owner.get("ball_owner_image_contact"),
+            "assignment_reason": owner.get("ball_owner_assignment_reason"),
             "source": owner.get("ball_owner_source") or (ball.get("source") if ball else None),
             "missing_frames": owner.get("ball_missing_frames"),
             "candidates": ball.get("owner_candidates", []) if ball else [],
@@ -410,16 +540,22 @@ def build_possession_timeline(records: list[dict[str, Any]], fps: float) -> list
                 "sources": [],
                 "confidences": [],
                 "distances_m": [],
+                "image_contacts": [],
+                "assignment_reasons": [],
             }
         else:
             current["end_frame"] = frame
 
         if possession.get("source"):
             current["sources"].append(possession.get("source"))
+        if possession.get("assignment_reason"):
+            current["assignment_reasons"].append(possession.get("assignment_reason"))
         if possession.get("confidence") is not None:
             current["confidences"].append(float(possession["confidence"]))
         if possession.get("distance_m") is not None:
             current["distances_m"].append(float(possession["distance_m"]))
+        if possession.get("image_contact") is not None:
+            current["image_contacts"].append(float(possession["image_contact"]))
 
     if current is not None:
         finalize_timeline_segment(current, fps)
@@ -437,19 +573,32 @@ def finalize_timeline_segment(segment: dict[str, Any], fps: float) -> None:
     segment["duration_s"] = round((end - start + 1) / max(fps, 1e-6), 3)
     confidences = segment.pop("confidences", [])
     distances = segment.pop("distances_m", [])
+    image_contacts = segment.pop("image_contacts", [])
     sources = segment.get("sources", [])
+    reasons = segment.get("assignment_reasons", [])
     if confidences:
         segment["mean_confidence"] = round(float(np.mean(confidences)), 3)
         segment["max_confidence"] = round(float(np.max(confidences)), 3)
     if distances:
         segment["mean_distance_m"] = round(float(np.mean(distances)), 3)
+    if image_contacts:
+        segment["mean_image_contact"] = round(float(np.mean(image_contacts)), 3)
+        segment["max_image_contact"] = round(float(np.max(image_contacts)), 3)
     if sources:
-        counts: dict[str, int] = {}
-        for source in sources:
-            counts[str(source)] = counts.get(str(source), 0) + 1
-        segment["source_counts"] = counts
+        segment["source_counts"] = count_values(sources)
     else:
         segment.pop("sources", None)
+    if reasons:
+        segment["assignment_reason_counts"] = count_values(reasons)
+    else:
+        segment.pop("assignment_reasons", None)
+
+
+def count_values(values: list[Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        counts[str(value)] = counts.get(str(value), 0) + 1
+    return counts
 
 
 def display_record_identity(rec: dict[str, Any] | None) -> str | None:
