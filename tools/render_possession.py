@@ -16,11 +16,11 @@ if str(ROOT) not in sys.path:
 from basketball_cv.court import CourtSpec, court_to_canvas, draw_topdown_court, load_calibration
 from basketball_cv.events import densify_ball_track_for_render, detect_passes, interpolate_ball_gaps
 from basketball_cv.possession import (
-    assign_enhanced_ball_ownership,
     best_possession_for_frame,
     build_possession_by_frame,
     build_possession_timeline,
 )
+from basketball_cv.possession_balanced import assign_balanced_ball_ownership
 from tools.analyze_video import (
     build_ball_trails_by_frame,
     build_pass_active_by_frame,
@@ -79,7 +79,7 @@ def main() -> None:
 
     events = load_events(Path(args.events)) if args.events else []
     interpolate_ball_gaps(records, fps)
-    ownership_report = assign_enhanced_ball_ownership(records, fps)
+    ownership_report = assign_balanced_ball_ownership(records, fps)
 
     if not args.no_detect_passes:
         recomputed_passes = detect_passes(records, fps)
@@ -183,6 +183,7 @@ def draw_frame_with_possession(
     if ball_trail:
         draw_ball_trail(frame, ball_trail)
     draw_possession_link(frame, possession)
+    draw_possession_ball_ring(frame, possession)
 
     for rec in records:
         color = color_for_record(rec)
@@ -202,7 +203,7 @@ def draw_frame_with_possession(
                 label += f" -> {rec['ball_owner_jersey_number']}"
             elif rec.get("ball_owner_player_id"):
                 label += f" -> P{rec['ball_owner_player_id']}"
-            if rec.get("ball_owner_assignment_reason") == "image_contact":
+            if rec.get("ball_owner_assignment_reason") in {"image_contact", "hand_contact_override"}:
                 label += " hand"
         else:
             label = rec["class_name"]
@@ -260,9 +261,6 @@ def draw_record_on_minimap(
     court_x = rec.get("court_x")
     court_y = rec.get("court_y")
     if is_possessed_ball and rec.get("possession_court_x") is not None and rec.get("possession_court_y") is not None:
-        # The raw ball projection is a floor-plane artefact when the ball is held
-        # high. Draw a faint raw position and then snap the tactical ball marker
-        # to the owner position with a tiny offset so it reads as possession.
         raw_pt = court_to_canvas(np.asarray([[rec["court_x"], rec["court_y"]]], dtype=np.float32), court_spec, pixels_per_meter=24, margin_px=18)[0]
         cv2.circle(minimap, (int(raw_pt[0]), int(raw_pt[1])), 4, (170, 170, 170), 1, cv2.LINE_AA)
         court_x = float(rec["possession_court_x"]) + 0.22
@@ -285,14 +283,26 @@ def draw_record_on_minimap(
 
 def draw_possession_halo(frame: np.ndarray, rec: dict[str, Any]) -> None:
     x1, y1, x2, y2 = [int(round(v)) for v in rec["bbox"]]
-    cx = int(round((x1 + x2) / 2.0))
-    cy = int(round(y2))
-    radius = max(18, int(round(max(x2 - x1, y2 - y1) * 0.38)))
-    cv2.circle(frame, (cx, cy), radius + 4, (0, 0, 0), 4, cv2.LINE_AA)
-    cv2.circle(frame, (cx, cy), radius, (0, 220, 255), 4, cv2.LINE_AA)
+    cv2.rectangle(frame, (x1 - 3, y1 - 3), (x2 + 3, y2 + 3), (0, 220, 255), 3, cv2.LINE_AA)
     y_text = min(frame.shape[0] - 10, y2 + 24)
     cv2.putText(frame, "BALL", (x1, y_text), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 0, 0), 4, cv2.LINE_AA)
     cv2.putText(frame, "BALL", (x1, y_text), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 220, 255), 2, cv2.LINE_AA)
+
+
+def draw_possession_ball_ring(frame: np.ndarray, possession: dict[str, Any] | None) -> None:
+    if not possession or possession.get("state") not in {"owned", "undetected_hold"}:
+        return
+    ball = possession.get("ball")
+    if not isinstance(ball, dict) or not isinstance(ball.get("bbox"), list):
+        return
+    x1, y1, x2, y2 = [int(round(float(v))) for v in ball["bbox"]]
+    cx = int(round((x1 + x2) / 2.0))
+    cy = int(round((y1 + y2) / 2.0))
+    radius = max(20, int(round(max(x2 - x1, y2 - y1) * 1.6)))
+    cv2.circle(frame, (cx, cy), radius + 3, (0, 0, 0), 4, cv2.LINE_AA)
+    cv2.circle(frame, (cx, cy), radius, (0, 220, 255), 4, cv2.LINE_AA)
+    cv2.putText(frame, "BALL", (cx - radius, min(frame.shape[0] - 10, cy + radius + 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 0, 0), 4, cv2.LINE_AA)
+    cv2.putText(frame, "BALL", (cx - radius, min(frame.shape[0] - 10, cy + radius + 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 220, 255), 2, cv2.LINE_AA)
 
 
 def draw_possession_link(frame: np.ndarray, possession: dict[str, Any] | None) -> None:
