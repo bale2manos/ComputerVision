@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the full pipeline and render with an optional learned possession classifier."
+        description="Run the full pipeline and render with optional learned possession models."
     )
     parser.add_argument("--video", required=True)
     parser.add_argument("--output-root", default="runs/pipeline")
@@ -34,6 +34,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ocr-device", default="cuda", choices=["cuda", "cpu"])
     parser.add_argument("--save-crops", action="store_true")
     parser.add_argument("--identity-overrides", default=None)
+    parser.add_argument("--possession-detector-model", default=None)
+    parser.add_argument("--possession-detector-conf", type=float, default=0.35)
+    parser.add_argument("--possession-detector-imgsz", type=int, default=960)
+    parser.add_argument("--possession-detector-device", default=None)
     parser.add_argument("--possession-model", default=None)
     parser.add_argument("--possession-min-confidence", type=float, default=0.58)
     parser.add_argument("--possession-min-margin", type=float, default=0.10)
@@ -121,6 +125,17 @@ def main() -> None:
         render_cmd += ["--jersey-numbers", str(jersey_numbers)]
     if args.identity_overrides:
         render_cmd += ["--identity-overrides", str(resolve_path(args.identity_overrides))]
+    if args.possession_detector_model:
+        render_cmd += [
+            "--possession-detector-model",
+            str(resolve_path(args.possession_detector_model)),
+            "--possession-detector-conf",
+            str(args.possession_detector_conf),
+            "--possession-detector-imgsz",
+            str(args.possession_detector_imgsz),
+        ]
+        if args.possession_detector_device:
+            render_cmd += ["--possession-detector-device", args.possession_detector_device]
     if args.possession_model:
         render_cmd += [
             "--possession-model",
