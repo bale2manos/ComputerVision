@@ -35,6 +35,12 @@ class EnhancedBallOwnershipConfig(BallOwnershipConfig):
     image_contact_bonus: float = 1.25
     image_contact_confidence_weight: float = 0.72
     contact_override_max_court_distance_m: float = 7.5
+    opponent_switch_min_frames: int = 3
+    same_team_switch_min_frames: int = 2
+    decisive_switch_contact_advantage: float = 0.45
+    decisive_switch_score_advantage: float = 1.25
+    previous_owner_grace_radius_m: float = 8.0
+    previous_owner_min_contact_to_hold: float = 0.18
 
 
 def assign_enhanced_ball_ownership(
@@ -60,6 +66,9 @@ def assign_enhanced_ball_ownership(
     previous_owner: int | None = None
     previous_team: str | None = None
     previous_ball: dict[str, Any] | None = None
+    pending_owner: int | None = None
+    pending_owner_team: str | None = None
+    pending_owner_frames = 0
     missing_ball_frames = 0
     max_missing_hold_frames = max(1, int(round(config.short_occlusion_hold_s * max(fps, 1.0))))
 
@@ -70,6 +79,8 @@ def assign_enhanced_ball_ownership(
     flight_ball_frames = 0
     held_without_ball_frames = 0
     image_contact_owned_frames = 0
+    suppressed_switch_frames = 0
+    decisive_switch_frames = 0
 
     for frame in sorted(by_frame):
         frame_records = by_frame[frame]
@@ -81,6 +92,9 @@ def assign_enhanced_ball_ownership(
 
         if ball is None:
             missing_ball_frames += 1
+            pending_owner = None
+            pending_owner_team = None
+            pending_owner_frames = 0
             held_owner = hold_previous_owner_during_occlusion(
                 frame_records,
                 previous_owner,
@@ -107,8 +121,66 @@ def assign_enhanced_ball_ownership(
         if candidates:
             ball["owner_candidates"] = candidates[: max(0, int(config.debug_candidate_count))]
 
-        owner = choose_temporal_owner(ball, players, previous_owner, previous_team, config)
+        raw_owner = choose_temporal_owner(ball, players, previous_owner, previous_team, config)
+        owner = raw_owner
+
+        if owner is None and previous_owner is not None:
+            previous_candidate = find_player_by_owner(players, previous_owner)
+            if previous_candidate is not None and previous_owner_still_plausible(ball, previous_candidate, config):
+                owner = previous_candidate
+                ball["possession_hold_reason"] = "dribble_or_contested_ball_hold"
+                suppressed_switch_frames += 1
+
+        if owner is not None and previous_owner is not None:
+            owner_id_tmp = _player_key(owner)
+            if owner_id_tmp is not None and owner_id_tmp != previous_owner:
+                previous_candidate = find_player_by_owner(players, previous_owner)
+                if previous_candidate is not None and previous_owner_still_plausible(ball, previous_candidate, config):
+                    owner_team_tmp = owner.get("team")
+                    if pending_owner == owner_id_tmp:
+                        pending_owner_frames += 1
+                    else:
+                        pending_owner = owner_id_tmp
+                        pending_owner_team = owner_team_tmp
+                        pending_owner_frames = 1
+
+                    required_frames = (
+                        config.same_team_switch_min_frames
+                        if owner_team_tmp is not None and owner_team_tmp == previous_team
+                        else config.opponent_switch_min_frames
+                    )
+                    decisive = is_decisive_takeover(ball, owner, previous_candidate, previous_owner, previous_team, config)
+                    if pending_owner_frames < required_frames and not decisive:
+                        ball["possession_switch_suppressed"] = {
+                            "candidate_player_id": owner_id_tmp,
+                            "candidate_team": owner_team_tmp,
+                            "previous_player_id": previous_owner,
+                            "previous_team": previous_team,
+                            "pending_frames": pending_owner_frames,
+                            "required_frames": required_frames,
+                            "reason": "temporal_hysteresis",
+                        }
+                        owner = previous_candidate
+                        suppressed_switch_frames += 1
+                    elif decisive:
+                        ball["possession_switch_decisive"] = True
+                        decisive_switch_frames += 1
+                        pending_owner = None
+                        pending_owner_team = None
+                        pending_owner_frames = 0
+                else:
+                    pending_owner = None
+                    pending_owner_team = None
+                    pending_owner_frames = 0
+            else:
+                pending_owner = None
+                pending_owner_team = None
+                pending_owner_frames = 0
+
         if owner is None:
+            pending_owner = None
+            pending_owner_team = None
+            pending_owner_frames = 0
             state = unowned_ball_state(ball, previous_ball, previous_owner, fps, config)
             ball["ball_state"] = state
             if state == "flight":
@@ -128,6 +200,12 @@ def assign_enhanced_ball_ownership(
             continue
 
         attach_owner_fields(ball, owner, owner_id, previous_owner, previous_team, config)
+        if ball.get("possession_switch_suppressed"):
+            ball["ball_owner_assignment_reason"] = "temporal_hysteresis"
+            owner["ball_owner_assignment_reason"] = "temporal_hysteresis"
+        if ball.get("possession_hold_reason"):
+            ball["ball_owner_assignment_reason"] = str(ball["possession_hold_reason"])
+            owner["ball_owner_assignment_reason"] = str(ball["possession_hold_reason"])
         if float(ball.get("ball_owner_image_contact") or 0.0) >= config.strong_image_contact:
             image_contact_owned_frames += 1
         owner_counts[owner_id] += 1
@@ -143,6 +221,8 @@ def assign_enhanced_ball_ownership(
         "flight_ball_frames": flight_ball_frames,
         "held_without_ball_frames": held_without_ball_frames,
         "image_contact_owned_frames": image_contact_owned_frames,
+        "suppressed_switch_frames": suppressed_switch_frames,
+        "decisive_switch_frames": decisive_switch_frames,
         "unique_owners": len(owner_counts),
         "owner_frame_counts": {str(k): int(v) for k, v in sorted(owner_counts.items())},
         "parameters": {
@@ -153,6 +233,10 @@ def assign_enhanced_ball_ownership(
             "strong_image_contact": config.strong_image_contact,
             "image_contact_bonus": config.image_contact_bonus,
             "contact_override_max_court_distance_m": config.contact_override_max_court_distance_m,
+            "opponent_switch_min_frames": config.opponent_switch_min_frames,
+            "same_team_switch_min_frames": config.same_team_switch_min_frames,
+            "previous_owner_grace_radius_m": config.previous_owner_grace_radius_m,
+            "previous_owner_min_contact_to_hold": config.previous_owner_min_contact_to_hold,
             "min_owner_confidence": config.min_owner_confidence,
         },
     }
@@ -177,6 +261,8 @@ def clear_possession_fields(rec: dict[str, Any]) -> None:
         "owner_candidates",
         "ball_missing_frames",
         "possession_hold_reason",
+        "possession_switch_suppressed",
+        "possession_switch_decisive",
         "possession_court_x",
         "possession_court_y",
     ):
@@ -248,6 +334,54 @@ def choose_temporal_owner(
     if confidence < config.min_owner_confidence:
         return None
     return best
+
+
+def find_player_by_owner(players: list[dict[str, Any]], owner_id: int | None) -> dict[str, Any] | None:
+    if owner_id is None:
+        return None
+    for player in players:
+        if _player_key(player) == owner_id:
+            return player
+    return None
+
+
+def previous_owner_still_plausible(
+    ball: dict[str, Any],
+    previous_player: dict[str, Any],
+    config: EnhancedBallOwnershipConfig,
+) -> bool:
+    contact = ball_player_image_contact(ball, previous_player)
+    if contact >= config.previous_owner_min_contact_to_hold:
+        return True
+    if _ball_player_overlap_fraction(ball, previous_player) > 0.02:
+        return True
+    if _distance(ball, previous_player) <= config.previous_owner_grace_radius_m:
+        return True
+    return False
+
+
+def is_decisive_takeover(
+    ball: dict[str, Any],
+    new_owner: dict[str, Any],
+    previous_player: dict[str, Any],
+    previous_owner: int | None,
+    previous_team: str | None,
+    config: EnhancedBallOwnershipConfig,
+) -> bool:
+    new_contact = ball_player_image_contact(ball, new_owner)
+    prev_contact = ball_player_image_contact(ball, previous_player)
+    new_score = enhanced_ownership_score(ball, new_owner, previous_owner, previous_team, config)
+    prev_score = enhanced_ownership_score(ball, previous_player, previous_owner, previous_team, config)
+    new_dist = _distance(ball, new_owner)
+    prev_dist = _distance(ball, previous_player)
+
+    # A true steal/catch should be visibly and geometrically much better, not
+    # just a one-frame overlap during a dribble through bodies.
+    if new_contact >= 0.96 and prev_contact <= 0.15 and new_score <= prev_score - config.decisive_switch_score_advantage:
+        return True
+    if new_contact >= prev_contact + config.decisive_switch_contact_advantage and new_dist <= max(1.15, prev_dist * 0.45):
+        return True
+    return False
 
 
 def attach_owner_fields(
