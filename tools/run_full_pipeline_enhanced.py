@@ -286,12 +286,16 @@ def resolve_ball_model(value: str | None) -> Path | None:
     if value.lower() != "auto":
         path = resolve_input_path(value)
         return path if path.exists() else None
-    candidates = sorted(
-        (ROOT / "runs" / "ball_train").glob("**/weights/best.pt"),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
-    return candidates[0] if candidates else None
+    # Search in both old and new locations (with runs/detect prefix)
+    for search_root in [(ROOT / "runs" / "detect" / "runs" / "ball_train"), (ROOT / "runs" / "ball_train")]:
+        candidates = sorted(
+            search_root.glob("**/weights/best.pt"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        if candidates:
+            return candidates[0]
+    return None
 
 
 def run_step(name: str, cmd: list[str], history: list[dict[str, Any]]) -> None:
