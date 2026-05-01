@@ -35,8 +35,8 @@ class EnhancedBallOwnershipConfig(BallOwnershipConfig):
     image_contact_bonus: float = 1.25
     image_contact_confidence_weight: float = 0.72
     contact_override_max_court_distance_m: float = 7.5
-    opponent_switch_min_frames: int = 3
-    same_team_switch_min_frames: int = 2
+    opponent_switch_min_frames: int = 10
+    same_team_switch_min_frames: int = 5
     decisive_switch_contact_advantage: float = 0.45
     decisive_switch_score_advantage: float = 1.25
     previous_owner_grace_radius_m: float = 8.0
