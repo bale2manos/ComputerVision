@@ -1,0 +1,24 @@
+{
+  "track_overrides": [
+    {
+      "track_id": 6,
+      "first_frame": 0,
+      "last_frame": 336,
+      "team": "dark",
+      "jersey_number": "42",
+      "jersey_identity": "dark_42",
+      "canonical_player_id": 12,
+      "reason": "manual_review_track6_is_dark_42_before_initial_cross"
+    },
+    {
+      "track_ids": [3, 18, 19, 20],
+      "first_frame": 0,
+      "last_frame": 338,
+      "team": "dark",
+      "jersey_number": "93",
+      "jersey_identity": "dark_93",
+      "canonical_player_id": 2,
+      "reason": "manual_review_tracks_are_dark_93"
+    }
+  ]
+}
