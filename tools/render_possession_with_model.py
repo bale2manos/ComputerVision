@@ -13,6 +13,7 @@ from basketball_cv.court import CourtSpec, load_calibration
 from basketball_cv.events import densify_ball_track_for_render, detect_passes, interpolate_ball_gaps
 from basketball_cv.possession import build_possession_timeline
 from basketball_cv.possession_balanced import assign_balanced_ball_ownership
+from basketball_cv.possession_detector import PossessionDetectorConfig, PossessionStateDetector
 from basketball_cv.possession_model import PossessionClassifier, PossessionModelConfig
 from tools.analyze_video import write_json
 from tools.render_possession import render_annotated_video_with_possession
@@ -27,13 +28,17 @@ from tools.render_tracks import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Render tracks using balanced possession plus an optional learned possession classifier."
+        description="Render tracks using balanced possession plus optional learned possession models."
     )
     parser.add_argument("--video", required=True, help="Input video path.")
     parser.add_argument("--tracks", required=True, help="tracks.json produced by analyze_video.py.")
     parser.add_argument("--calibration", required=True, help="Court calibration JSON.")
     parser.add_argument("--output", required=True, help="Output MP4 path.")
-    parser.add_argument("--possession-model", default=None, help="Optional YOLO classification .pt for player-ball state.")
+    parser.add_argument("--possession-detector-model", default=None, help="Optional YOLO detection .pt with classes like player-in-possession.")
+    parser.add_argument("--possession-detector-conf", type=float, default=0.35)
+    parser.add_argument("--possession-detector-imgsz", type=int, default=960)
+    parser.add_argument("--possession-detector-device", default=None)
+    parser.add_argument("--possession-model", default=None, help="Optional YOLO classification .pt for player-ball state crops.")
     parser.add_argument("--possession-imgsz", type=int, default=224, help="Reserved for future model export/inference tuning.")
     parser.add_argument("--possession-min-confidence", type=float, default=0.58)
     parser.add_argument("--possession-min-margin", type=float, default=0.10)
@@ -71,6 +76,16 @@ def main() -> None:
     events = load_events(Path(args.events)) if args.events else []
     interpolate_ball_gaps(records, fps)
     ownership_report = assign_balanced_ball_ownership(records, fps)
+
+    if args.possession_detector_model:
+        detector_config = PossessionDetectorConfig(
+            conf=args.possession_detector_conf,
+            imgsz=args.possession_detector_imgsz,
+            device=args.possession_detector_device,
+        )
+        detector = PossessionStateDetector(args.possession_detector_model, config=detector_config)
+        detector_report = detector.apply_to_records(records, args.video, fps)
+        ownership_report["state_detector"] = detector_report
 
     if args.possession_model:
         config = PossessionModelConfig(
