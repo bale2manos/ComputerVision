@@ -202,6 +202,8 @@ def draw_frame_with_possession(
                 label += f" -> {rec['ball_owner_jersey_number']}"
             elif rec.get("ball_owner_player_id"):
                 label += f" -> P{rec['ball_owner_player_id']}"
+            if rec.get("ball_owner_assignment_reason") == "image_contact":
+                label += " hand"
         else:
             label = rec["class_name"]
             if rec.get("jersey_number"):
@@ -218,15 +220,8 @@ def draw_frame_with_possession(
         cv2.putText(frame, label, (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
         cv2.putText(frame, label, (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
 
-        if minimap is not None and rec.get("court_x") is not None and rec.get("court_y") is not None:
-            pt = court_to_canvas(np.asarray([[rec["court_x"], rec["court_y"]]], dtype=np.float32), court_spec, pixels_per_meter=24, margin_px=18)[0]
-            radius = 8 if has_ball else (6 if rec["class_name"] == "person" else 4)
-            if has_ball:
-                cv2.circle(minimap, (int(pt[0]), int(pt[1])), radius + 3, (0, 210, 255), 2, cv2.LINE_AA)
-            cv2.circle(minimap, (int(pt[0]), int(pt[1])), radius, color, -1)
-            label_id = rec.get("jersey_number") or (rec.get("player_id") if rec.get("player_id") is not None else rec.get("track_id"))
-            if label_id is not None:
-                cv2.putText(minimap, str(label_id), (int(pt[0]) + 7, int(pt[1]) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+        if minimap is not None:
+            draw_record_on_minimap(minimap, rec, court_spec, color, possession)
 
     if toasts:
         draw_toasts(frame, toasts)
@@ -247,6 +242,45 @@ def draw_frame_with_possession(
     frame[y0 : y0 + mh, x0 : x0 + mw] = blended
     cv2.rectangle(frame, (x0, y0), (x0 + mw, y0 + mh), (40, 40, 40), 1)
     return frame
+
+
+def draw_record_on_minimap(
+    minimap: np.ndarray,
+    rec: dict[str, Any],
+    court_spec: CourtSpec,
+    color: tuple[int, int, int],
+    possession: dict[str, Any] | None,
+) -> None:
+    if rec.get("court_x") is None or rec.get("court_y") is None:
+        return
+
+    is_possessed_ball = rec.get("class_name") == "sports ball" and rec.get("ball_owner_player_id") is not None
+    has_ball = bool(rec.get("has_ball")) and rec.get("class_name") == "person"
+
+    court_x = rec.get("court_x")
+    court_y = rec.get("court_y")
+    if is_possessed_ball and rec.get("possession_court_x") is not None and rec.get("possession_court_y") is not None:
+        # The raw ball projection is a floor-plane artefact when the ball is held
+        # high. Draw a faint raw position and then snap the tactical ball marker
+        # to the owner position with a tiny offset so it reads as possession.
+        raw_pt = court_to_canvas(np.asarray([[rec["court_x"], rec["court_y"]]], dtype=np.float32), court_spec, pixels_per_meter=24, margin_px=18)[0]
+        cv2.circle(minimap, (int(raw_pt[0]), int(raw_pt[1])), 4, (170, 170, 170), 1, cv2.LINE_AA)
+        court_x = float(rec["possession_court_x"]) + 0.22
+        court_y = float(rec["possession_court_y"]) + 0.22
+
+    pt = court_to_canvas(np.asarray([[court_x, court_y]], dtype=np.float32), court_spec, pixels_per_meter=24, margin_px=18)[0]
+    radius = 8 if has_ball else (6 if rec["class_name"] == "person" else 4)
+    if has_ball:
+        cv2.circle(minimap, (int(pt[0]), int(pt[1])), radius + 3, (0, 210, 255), 2, cv2.LINE_AA)
+    if is_possessed_ball:
+        cv2.circle(minimap, (int(pt[0]), int(pt[1])), 7, (0, 210, 255), -1, cv2.LINE_AA)
+        cv2.circle(minimap, (int(pt[0]), int(pt[1])), 9, (0, 0, 0), 1, cv2.LINE_AA)
+    else:
+        cv2.circle(minimap, (int(pt[0]), int(pt[1])), radius, color, -1)
+
+    label_id = rec.get("jersey_number") or (rec.get("player_id") if rec.get("player_id") is not None else rec.get("track_id"))
+    if label_id is not None and rec.get("class_name") == "person":
+        cv2.putText(minimap, str(label_id), (int(pt[0]) + 7, int(pt[1]) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
 
 
 def draw_possession_halo(frame: np.ndarray, rec: dict[str, Any]) -> None:
@@ -304,7 +338,11 @@ def draw_possession_hud(frame: np.ndarray, possession: dict[str, Any] | None, de
         detail.append(f"conf {float(possession['confidence']):.2f}")
     if possession.get("distance_m") is not None:
         detail.append(f"dist {float(possession['distance_m']):.2f}m")
-    if possession.get("source"):
+    if possession.get("image_contact") is not None:
+        detail.append(f"contact {float(possession['image_contact']):.2f}")
+    if possession.get("assignment_reason"):
+        detail.append(str(possession["assignment_reason"]))
+    elif possession.get("source"):
         detail.append(str(possession["source"]))
     if detail:
         lines.append(" | ".join(detail))
@@ -315,13 +353,16 @@ def draw_possession_hud(frame: np.ndarray, possession: dict[str, Any] | None, de
             lines.append("Candidatos:")
             for cand in candidates[:3]:
                 label = cand.get("jersey_number") or cand.get("identity") or f"P{cand.get('player_id')}"
-                lines.append(f"{label} {cand.get('team', '')} d={cand.get('distance_m')} s={cand.get('score')} c={cand.get('confidence')}")
+                lines.append(
+                    f"{label} {cand.get('team', '')} d={cand.get('distance_m')} "
+                    f"ct={cand.get('image_contact')} s={cand.get('score')} c={cand.get('confidence')}"
+                )
 
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = 0.56
     thickness = 2
     sizes = [cv2.getTextSize(line, font, 0.62 if i == 0 else font_scale, thickness)[0] for i, line in enumerate(lines)]
-    box_w = min(max(w for w, _ in sizes) + 28, int(frame.shape[1] * 0.58))
+    box_w = min(max(w for w, _ in sizes) + 28, int(frame.shape[1] * 0.68))
     line_h = 24
     box_h = 18 + line_h * len(lines)
     x0 = max(12, frame.shape[1] - box_w - 18)
