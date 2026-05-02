@@ -44,6 +44,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--team-calibration-window", type=int, default=90)
     parser.add_argument("--team-calibration-max-distance", type=float, default=0.72)
     parser.add_argument("--team-calibration-min-margin", type=float, default=0.015)
+    parser.add_argument("--team-switch-min-frames", type=int, default=10)
+    parser.add_argument("--team-switch-max-gap", type=int, default=4)
+    parser.add_argument("--team-switch-strong-margin", type=float, default=0.045)
     parser.add_argument("--possession-detector-model", default=None, help="Optional YOLO detection .pt with classes like player-in-possession.")
     parser.add_argument("--possession-detector-conf", type=float, default=0.35)
     parser.add_argument("--possession-detector-imgsz", type=int, default=960)
@@ -98,6 +101,9 @@ def main() -> None:
             seed_window_frames=args.team_calibration_window,
             min_margin=args.team_calibration_min_margin,
             max_distance=args.team_calibration_max_distance,
+            min_switch_frames=args.team_switch_min_frames,
+            switch_max_gap_frames=args.team_switch_max_gap,
+            strong_switch_margin=args.team_switch_strong_margin,
         )
         reports["manual_team_calibration"] = apply_team_calibration(
             records,
