@@ -59,8 +59,17 @@ def main() -> None:
         court_points.append(canvas_to_court((x, y), spec, pixels_per_meter=args.ppm))
         state["waiting_for"] = "image"
 
-    cv2.namedWindow("video_frame", cv2.WINDOW_NORMAL)
-    cv2.namedWindow("topdown_court", cv2.WINDOW_NORMAL)
+    try:
+        cv2.namedWindow("video_frame", cv2.WINDOW_NORMAL)
+        cv2.namedWindow("topdown_court", cv2.WINDOW_NORMAL)
+    except cv2.error:
+        sys.stderr.write(
+            "\nOpenCV appears to be built without GUI/highgui support.\n"
+            "If you installed 'opencv-python-headless', uninstall it and install 'opencv-python'.\n"
+            "Run:\n  python -m pip uninstall -y opencv-python-headless\n  python -m pip install --upgrade --force-reinstall opencv-python\n\n"
+        )
+        raise SystemExit(1)
+
     cv2.setMouseCallback("video_frame", on_image)
     cv2.setMouseCallback("topdown_court", on_court)
 
