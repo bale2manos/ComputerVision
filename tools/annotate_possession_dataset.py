@@ -178,6 +178,7 @@ def annotate_video(video: Path, tracks_path: Path, args: argparse.Namespace, out
             continue
         if key in LABEL_KEYS:
             state["current_label"] = LABEL_KEYS[key]
+            print(f"[label] current owner label: {state['current_label']}")
             continue
         if key == ord("x"):
             save_loose_frame(state)
@@ -294,7 +295,7 @@ def write_crop(
     cv2.imwrite(str(path), crop)
 
     rel = path.relative_to(state["out_root"])
-    state["writer"]..writerow(
+    state["writer"].writerow(
         {
             "file": str(rel),
             "video": str(state["video"]),
