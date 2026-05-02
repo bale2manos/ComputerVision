@@ -190,7 +190,111 @@ def apply_roles(records: list[dict[str, Any]], track_roles: dict[int, dict[str, 
 
 
 def apply_generic_team_clustering(records: list[dict[str, Any]]) -> dict[str, Any]:
-    tracks: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    """Cluster player uniforms into generic team_a/team_b with frame-level correction.
+
+    Earlier versions assigned one team per track. That fails when the tracker ID
+    jumps from one player to another during congestion: the new player inherits
+    the old track's team. This version clusters clean per-frame jersey samples,
+    uses track majority as a fallback, and lets high-margin frame samples override
+    the track label. It remains color-agnostic: labels are generic team_a/team_b.
+    """
+
+    samples = collect_team_samples(records)
+    if len(samples) < 8:
+        return {"enabled": True, "samples_used": len(samples), "status": "not_enough_samples"}
+
+    matrix = np.asarray([sample["feature"] for sample in samples], dtype=np.float32)
+    centers, assignment = kmeans(matrix, 2)
+    labels = {0: "team_a", 1: "team_b"}
+
+    sample_assignments: dict[tuple[int, int], dict[str, Any]] = {}
+    track_votes: dict[int, Counter[str]] = defaultdict(Counter)
+    for sample, cluster_id in zip(samples, assignment):
+        distances = np.linalg.norm(centers - sample["feature"], axis=1)
+        order = np.argsort(distances)
+        best = int(order[0])
+        second = int(order[1]) if len(order) > 1 else best
+        margin = float(distances[second] - distances[best])
+        confidence = float(margin / max(float(distances[second]), 1e-6)) if second != best else 1.0
+        team = labels[int(cluster_id)]
+        key = (int(sample["frame_index"]), int(sample["track_id"]))
+        sample_assignments[key] = {
+            "team": team,
+            "cluster": int(cluster_id),
+            "confidence": round(confidence, 4),
+            "margin": round(margin, 4),
+        }
+        track_votes[int(sample["track_id"])][team] += 1
+
+    track_to_team: dict[int, str] = {}
+    track_confidence: dict[int, float] = {}
+    ambiguous_tracks = []
+    for track_id, votes in track_votes.items():
+        total = sum(votes.values())
+        top = votes.most_common(2)
+        best_team, best_count = top[0]
+        second_count = top[1][1] if len(top) > 1 else 0
+        dominance = (best_count - second_count) / max(total, 1)
+        if best_count >= 3 and dominance >= 0.12:
+            track_to_team[track_id] = best_team
+            track_confidence[track_id] = round(float(dominance), 4)
+        else:
+            ambiguous_tracks.append(track_id)
+
+    frame_level_overrides = 0
+    track_fallbacks = 0
+    for rec in records:
+        if rec.get("class_name") != "person" or rec.get("track_id") is None:
+            continue
+        if rec.get("role") not in (None, "player"):
+            continue
+        track_id = int(rec["track_id"])
+        old_team = rec.get("team")
+        rec["team_observation_before_generic_cluster"] = old_team
+
+        sample_key = (int(rec.get("frame_index", 0)), track_id)
+        sample_team = sample_assignments.get(sample_key)
+        fallback_team = track_to_team.get(track_id)
+        assigned_team = fallback_team
+        source = "track_majority"
+        confidence = track_confidence.get(track_id)
+
+        # If the current frame's jersey crop is clearly in the opposite cluster,
+        # trust it. This handles tracker ID switches like a red player inheriting
+        # a previous black player's track ID.
+        if sample_team is not None and float(sample_team["confidence"]) >= 0.035:
+            assigned_team = str(sample_team["team"])
+            source = "frame_cluster"
+            confidence = float(sample_team["confidence"])
+            if assigned_team != fallback_team:
+                frame_level_overrides += 1
+        elif fallback_team is not None:
+            track_fallbacks += 1
+
+        if assigned_team is None:
+            continue
+        rec["team"] = assigned_team
+        rec["team_cluster_source"] = source
+        rec["team_cluster_confidence"] = round(float(confidence or 0.0), 4)
+        rec["player_candidate"] = bool(rec.get("on_court") is not False)
+        rec["track_player_candidate"] = True
+
+    return {
+        "enabled": True,
+        "mode": "frame_aware_generic_cluster",
+        "samples_used": len(samples),
+        "tracks_used": len(track_votes),
+        "labels": labels,
+        "track_to_team": {str(k): v for k, v in sorted(track_to_team.items())},
+        "track_confidence": {str(k): v for k, v in sorted(track_confidence.items())},
+        "ambiguous_tracks": [int(v) for v in sorted(ambiguous_tracks)],
+        "frame_level_overrides": frame_level_overrides,
+        "track_fallbacks": track_fallbacks,
+    }
+
+
+def collect_team_samples(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    samples = []
     for rec in records:
         if rec.get("class_name") != "person" or rec.get("track_id") is None:
             continue
@@ -198,43 +302,31 @@ def apply_generic_team_clustering(records: list[dict[str, Any]]) -> dict[str, An
             continue
         if rec.get("player_candidate") is False:
             continue
-        tracks[int(rec["track_id"])].append(rec)
-
-    track_features = []
-    track_ids = []
-    for track_id, track_records in tracks.items():
-        feature = median_track_feature(track_records)
-        if feature is not None:
-            track_ids.append(track_id)
-            track_features.append(feature)
-
-    if len(track_features) < 2:
-        return {"enabled": True, "tracks_used": len(track_features), "status": "not_enough_tracks"}
-
-    matrix = np.asarray(track_features, dtype=np.float32)
-    centers, assignment = kmeans(matrix, 2)
-    labels = label_clusters_by_brightness(centers)
-    track_to_team = {track_id: labels[int(cluster)] for track_id, cluster in zip(track_ids, assignment)}
-
-    for rec in records:
-        if rec.get("class_name") != "person" or rec.get("track_id") is None:
+        if rec.get("on_court") is False or rec.get("bottom_truncated"):
             continue
-        if rec.get("role") not in (None, "player"):
+        if float(rec.get("confidence") or 0.0) < 0.35:
             continue
-        team = track_to_team.get(int(rec["track_id"]))
-        if team is None:
+        feature = record_team_feature(rec)
+        if feature is None:
             continue
-        rec["team_observation_before_generic_cluster"] = rec.get("team")
-        rec["team"] = team
-        rec["player_candidate"] = bool(rec.get("on_court") is not False)
-        rec["track_player_candidate"] = True
+        samples.append(
+            {
+                "track_id": int(rec["track_id"]),
+                "frame_index": int(rec.get("frame_index", 0)),
+                "feature": feature,
+            }
+        )
+    return samples
 
-    return {
-        "enabled": True,
-        "tracks_used": len(track_ids),
-        "labels": labels,
-        "track_to_team": {str(k): v for k, v in sorted(track_to_team.items())},
-    }
+
+def record_team_feature(rec: dict[str, Any]) -> np.ndarray | None:
+    if rec.get("jersey_embedding"):
+        return np.asarray(rec["jersey_embedding"], dtype=np.float32)
+    if rec.get("jersey_bgr"):
+        color = np.asarray(rec["jersey_bgr"], dtype=np.float32)
+        norm = float(np.linalg.norm(color))
+        return color / norm if norm > 0 else color
+    return None
 
 
 def median_track_feature(track_records: list[dict[str, Any]]) -> np.ndarray | None:
@@ -245,7 +337,6 @@ def median_track_feature(track_records: list[dict[str, Any]]) -> np.ndarray | No
     if len(colors) < 2:
         return None
     colors = np.asarray(colors, dtype=np.float32)
-    # Normalize BGR so the cluster is not tied to red/dark names.
     med = np.median(colors, axis=0)
     norm = float(np.linalg.norm(med))
     return med / norm if norm > 0 else med
@@ -273,7 +364,6 @@ def kmeans(matrix: np.ndarray, k: int = 2, iterations: int = 50) -> tuple[np.nda
 
 
 def label_clusters_by_brightness(centers: np.ndarray) -> dict[int, str]:
-    # Generic names: stable and not tied to concrete colors.
     if centers.shape[1] >= 3:
         brightness = centers[:, :3].mean(axis=1)
         order = list(np.argsort(brightness))
