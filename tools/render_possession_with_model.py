@@ -15,6 +15,7 @@ from basketball_cv.possession import build_possession_timeline
 from basketball_cv.possession_balanced import assign_balanced_ball_ownership
 from basketball_cv.possession_detector import PossessionDetectorConfig, PossessionStateDetector
 from basketball_cv.possession_model import PossessionClassifier, PossessionModelConfig
+from basketball_cv.role_classifier import PersonRoleClassifier, RoleClassifierConfig
 from tools.analyze_video import write_json
 from tools.render_possession import render_annotated_video_with_possession
 from tools.render_tracks import (
@@ -28,12 +29,16 @@ from tools.render_tracks import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Render tracks using balanced possession plus optional learned possession models."
+        description="Render tracks using role classification, generic teams and optional learned possession models."
     )
     parser.add_argument("--video", required=True, help="Input video path.")
     parser.add_argument("--tracks", required=True, help="tracks.json produced by analyze_video.py.")
     parser.add_argument("--calibration", required=True, help="Court calibration JSON.")
     parser.add_argument("--output", required=True, help="Output MP4 path.")
+    parser.add_argument("--role-model", default=None, help="Optional YOLO classification .pt for player/referee/other person crops.")
+    parser.add_argument("--role-min-confidence", type=float, default=0.55)
+    parser.add_argument("--role-sample-step", type=int, default=3)
+    parser.add_argument("--no-generic-team-clustering", action="store_true")
     parser.add_argument("--possession-detector-model", default=None, help="Optional YOLO detection .pt with classes like player-in-possession.")
     parser.add_argument("--possession-detector-conf", type=float, default=0.35)
     parser.add_argument("--possession-detector-imgsz", type=int, default=960)
@@ -63,6 +68,7 @@ def main() -> None:
     tracks = json.loads(Path(args.tracks).read_text(encoding="utf-8"))
     records = tracks.get("records", [])
     fps = float(tracks.get("fps", 60.0))
+    reports: dict[str, object] = {}
 
     if args.jersey_numbers:
         apply_jersey_numbers(records, Path(args.jersey_numbers))
@@ -73,9 +79,19 @@ def main() -> None:
         if not args.no_interpolate_jersey_gaps:
             interpolate_jersey_identity_gaps(records, fps, args.max_interpolation_gap)
 
+    if args.role_model:
+        role_config = RoleClassifierConfig(
+            min_confidence=args.role_min_confidence,
+            sample_step=args.role_sample_step,
+            generic_team_clustering=not args.no_generic_team_clustering,
+        )
+        role_classifier = PersonRoleClassifier(args.role_model, config=role_config)
+        reports["role_classifier"] = role_classifier.apply_to_records(records, args.video, fps)
+
     events = load_events(Path(args.events)) if args.events else []
     interpolate_ball_gaps(records, fps)
     ownership_report = assign_balanced_ball_ownership(records, fps)
+    ownership_report.update(reports)
 
     if args.possession_detector_model:
         detector_config = PossessionDetectorConfig(
