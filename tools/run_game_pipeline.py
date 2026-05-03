@@ -16,7 +16,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "One-command basketball CV pipeline: court calibration, tracking, ball model, "
-            "optional team calibration, role classifier, possession classifier, and final render."
+            "optional team calibration, role classifier, OCR, possession classifier, and final render."
         )
     )
     parser.add_argument("--video", required=True)
@@ -41,9 +41,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-analysis", action="store_true")
     parser.add_argument("--save-crops", action="store_true")
 
-    # OCR is optional because the simplified workflow focuses on stable roles/teams/ball first.
-    parser.add_argument("--with-ocr", action="store_true", help="Run jersey OCR. Disabled by default for faster iteration.")
+    # OCR
+    parser.add_argument("--with-ocr", action="store_true", help="Run jersey OCR and pass jersey_numbers.json into final render.")
     parser.add_argument("--ocr-device", default="cuda", choices=["cuda", "cpu"])
+    parser.add_argument("--jersey-numbers", default="auto", help="auto, none, or explicit jersey_numbers.json path for final render")
+    parser.add_argument("--identity-overrides", default="auto", help="auto, none, or explicit identity_overrides.json path for final render")
 
     # Role and team calibration
     parser.add_argument("--role-model", default="auto", help="auto, none, or explicit .pt path")
@@ -67,6 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-possession-hud", action="store_true")
     parser.add_argument("--no-detect-passes", action="store_true")
     parser.add_argument("--no-dense-ball-track", action="store_true")
+    parser.add_argument("--no-minimap", action="store_true")
     parser.add_argument("--dense-ball-max-gap", type=float, default=3.0)
     parser.add_argument("--clean-render", action="store_true", help="Alias for --no-possession-hud --no-detect-passes.")
     return parser.parse_args()
@@ -122,6 +125,9 @@ def main() -> None:
             summary,
         )
 
+    jersey_numbers = resolve_jersey_numbers(args.jersey_numbers, run_dir)
+    identity_overrides = resolve_identity_overrides(args.identity_overrides, run_dir)
+
     final_video = run_dir / "final_game_pipeline.mp4"
     possession_json = run_dir / "possession_timeline_game_pipeline.json"
     render_cmd = [
@@ -157,6 +163,10 @@ def main() -> None:
         ]
     if team_calibration and team_calibration.exists():
         render_cmd += ["--team-calibration", str(team_calibration)]
+    if jersey_numbers and jersey_numbers.exists():
+        render_cmd += ["--jersey-numbers", str(jersey_numbers)]
+    if identity_overrides and identity_overrides.exists():
+        render_cmd += ["--identity-overrides", str(identity_overrides)]
     if possession_model:
         render_cmd += [
             "--possession-model",
@@ -179,6 +189,8 @@ def main() -> None:
         render_cmd.append("--no-dense-ball-track")
     else:
         render_cmd += ["--dense-ball-max-gap", str(args.dense_ball_max_gap)]
+    if args.no_minimap:
+        render_cmd.append("--no-minimap")
     if args.debug_possession:
         render_cmd.append("--debug-possession")
 
@@ -192,6 +204,8 @@ def main() -> None:
         "team_calibration": str(team_calibration) if team_calibration and team_calibration.exists() else None,
         "role_model": str(role_model) if role_model else None,
         "possession_model": str(possession_model) if possession_model else None,
+        "jersey_numbers": str(jersey_numbers) if jersey_numbers and jersey_numbers.exists() else None,
+        "identity_overrides": str(identity_overrides) if identity_overrides and identity_overrides.exists() else None,
         "possession_timeline": str(possession_json) if possession_json.exists() else None,
         "command_log": str(run_dir / "game_pipeline_commands.txt"),
     }
@@ -257,6 +271,24 @@ def run_base_pipeline(args: argparse.Namespace, video: Path, run_dir: Path, cali
     else:
         cmd += ["--dense-ball-max-gap", str(args.dense_ball_max_gap)]
     run_step("base_tracking_ball", cmd, summary)
+
+
+def resolve_jersey_numbers(value: str | None, run_dir: Path) -> Path | None:
+    if value is None or str(value).lower() in {"none", "false", "no"}:
+        return None
+    if str(value).lower() == "auto":
+        candidate = run_dir / "jerseys" / "jersey_numbers.json"
+        return candidate if candidate.exists() else None
+    return resolve_path(value)
+
+
+def resolve_identity_overrides(value: str | None, run_dir: Path) -> Path | None:
+    if value is None or str(value).lower() in {"none", "false", "no"}:
+        return None
+    if str(value).lower() == "auto":
+        candidate = run_dir / "identity_overrides.json"
+        return candidate if candidate.exists() else None
+    return resolve_path(value)
 
 
 def should_create_team_calibration(args: argparse.Namespace, team_calibration: Path | None) -> bool:
