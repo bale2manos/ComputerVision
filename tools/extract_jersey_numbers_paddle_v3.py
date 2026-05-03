@@ -14,7 +14,7 @@ from typing import Any
 
 import numpy as np
 
-import tools.extract_jersey_numbers as base
+import extract_jersey_numbers as base
 
 
 def build_paddle_reader_v3(args: argparse.Namespace) -> Any:
