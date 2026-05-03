@@ -14,7 +14,7 @@ TEMPLATE_CONFIG = r"""
 
 Global:
   debug: false
-  use_gpu: true
+  use_gpu: {use_gpu}
   epoch_num: {epochs}
   log_smooth_window: 20
   print_batch_step: 10
@@ -80,8 +80,7 @@ Train:
       - DecodeImage:
           img_mode: BGR
           channel_first: false
-      - RecAug:
-      - CTCLabelEncode:
+{train_aug_block}      - CTCLabelEncode:
       - RecResizeImg:
           image_shape: [3, 48, 160]
       - KeepKeys:
@@ -90,7 +89,7 @@ Train:
     shuffle: true
     batch_size_per_card: {batch_size}
     drop_last: true
-    num_workers: 4
+    num_workers: {num_workers}
 
 Eval:
   dataset:
@@ -111,7 +110,7 @@ Eval:
     shuffle: false
     drop_last: false
     batch_size_per_card: {batch_size}
-    num_workers: 4
+    num_workers: {num_workers}
 """.strip()
 
 
@@ -128,6 +127,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--learning-rate", type=float, default=0.0005)
+    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--use-gpu", action="store_true", help="Set Global.use_gpu=true in the generated config.")
+    parser.add_argument("--no-rec-aug", action="store_true", help="Remove RecAug from the training transforms. Useful for a small first experiment.")
     parser.add_argument("--config-output", default=None)
     parser.add_argument("--run", action="store_true", help="Actually call PaddleOCR train.py using --paddleocr-dir.")
     parser.add_argument("--export", action="store_true", help="After training, call PaddleOCR export_model.py.")
@@ -153,8 +155,10 @@ def main() -> None:
     save_model_dir = output_dir / "checkpoints"
     save_inference_dir = output_dir / "inference"
     pretrained = args.pretrained_model or ""
+    train_aug_block = "" if args.no_rec_aug else "      - RecAug:\n"
 
     config = TEMPLATE_CONFIG.format(
+        use_gpu=str(bool(args.use_gpu)).lower(),
         epochs=args.epochs,
         save_model_dir=as_posix(save_model_dir),
         save_inference_dir=as_posix(save_inference_dir),
@@ -165,6 +169,8 @@ def main() -> None:
         train_list=as_posix(train_list),
         val_list=as_posix(val_list),
         batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        train_aug_block=train_aug_block,
     )
     config_path.write_text(config + "\n", encoding="utf-8")
 
@@ -177,7 +183,7 @@ def main() -> None:
     print(f'   python tools/train.py -c "{config_path}"')
     print("3) Export inference model:")
     print(f'   python tools/export_model.py -c "{config_path}" -o Global.pretrained_model="{save_model_dir / "best_accuracy"}" Global.save_inference_dir="{save_inference_dir}"')
-    print("4) Use it in this project:")
+    print("4) Use it in this project after extract_jersey_numbers.py is wired for PaddleOCR inference:")
     print(f'   python tools\\extract_jersey_numbers.py --ocr-engine both --paddle-rec-model-dir "{save_inference_dir}" --paddle-rec-char-dict "{dict_path}" ...')
 
     if args.run or args.export:
