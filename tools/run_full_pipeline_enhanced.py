@@ -45,6 +45,11 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--skip-ocr", action="store_true")
     parser.add_argument("--ocr-device", default="cuda", choices=["cuda", "cpu"])
+    parser.add_argument("--ocr-engine", choices=["easyocr", "paddle", "both"], default="easyocr")
+    parser.add_argument("--paddle-rec-model-dir", default=None)
+    parser.add_argument("--paddle-rec-char-dict", default=None)
+    parser.add_argument("--paddle-use-gpu", action="store_true")
+    parser.add_argument("--paddle-min-confidence", type=float, default=0.20)
     parser.add_argument("--max-crops-per-player", type=int, default=40)
     parser.add_argument("--ocr-sample-step", type=int, default=6)
     parser.add_argument("--save-crops", action="store_true")
@@ -184,11 +189,21 @@ def main() -> None:
             str(ocr_dir),
             "--device",
             args.ocr_device,
+            "--ocr-engine",
+            args.ocr_engine,
             "--max-crops-per-player",
             str(args.max_crops_per_player),
             "--sample-step",
             str(args.ocr_sample_step),
         ]
+        if args.ocr_engine in {"paddle", "both"}:
+            if args.paddle_rec_model_dir:
+                cmd += ["--paddle-rec-model-dir", str(resolve_input_path(args.paddle_rec_model_dir))]
+            if args.paddle_rec_char_dict:
+                cmd += ["--paddle-rec-char-dict", str(resolve_input_path(args.paddle_rec_char_dict))]
+            cmd += ["--paddle-min-confidence", str(args.paddle_min_confidence)]
+            if args.paddle_use_gpu:
+                cmd.append("--paddle-use-gpu")
         if player_summary_path.exists():
             cmd += ["--player-summary", str(player_summary_path)]
         if args.save_crops:
@@ -286,7 +301,6 @@ def resolve_ball_model(value: str | None) -> Path | None:
     if value.lower() != "auto":
         path = resolve_input_path(value)
         return path if path.exists() else None
-    # Search in both old and new locations (with runs/detect prefix)
     for search_root in [(ROOT / "runs" / "detect" / "runs" / "ball_train"), (ROOT / "runs" / "ball_train")]:
         candidates = sorted(
             search_root.glob("**/weights/best.pt"),
