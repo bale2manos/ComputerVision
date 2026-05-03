@@ -16,7 +16,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "One-command basketball CV pipeline: court calibration, tracking, ball model, "
-            "optional team calibration, role classifier, and final render."
+            "optional team calibration, role classifier, possession classifier, and final render."
         )
     )
     parser.add_argument("--video", required=True)
@@ -56,6 +56,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--team-switch-max-gap", type=int, default=5)
     parser.add_argument("--team-switch-strong-margin", type=float, default=0.045)
 
+    # Possession classifier
+    parser.add_argument("--possession-model", default="none", help="auto, none, or explicit .pt path")
+    parser.add_argument("--possession-max-candidates", type=int, default=7)
+    parser.add_argument("--possession-min-confidence", type=float, default=0.45)
+    parser.add_argument("--possession-min-margin", type=float, default=0.05)
+
     # Render
     parser.add_argument("--debug-possession", action="store_true")
     parser.add_argument("--no-possession-hud", action="store_true")
@@ -86,9 +92,10 @@ def main() -> None:
 
     calibration = resolve_optional_path(args.calibration) if args.calibration else run_dir / "court_calibration.json"
     role_model = resolve_model(args.role_model, role_model_candidates())
+    possession_model = resolve_model(args.possession_model, possession_model_candidates())
     team_calibration = resolve_team_calibration(args.team_calibration, run_dir)
 
-    print_header(run_dir, calibration, role_model, team_calibration)
+    print_header(run_dir, calibration, role_model, team_calibration, possession_model)
 
     run_base_pipeline(args, video, run_dir, calibration, summary)
 
@@ -150,6 +157,17 @@ def main() -> None:
         ]
     if team_calibration and team_calibration.exists():
         render_cmd += ["--team-calibration", str(team_calibration)]
+    if possession_model:
+        render_cmd += [
+            "--possession-model",
+            str(possession_model),
+            "--possession-max-candidates",
+            str(args.possession_max_candidates),
+            "--possession-min-confidence",
+            str(args.possession_min_confidence),
+            "--possession-min-margin",
+            str(args.possession_min_margin),
+        ]
     if args.clean_render:
         args.no_possession_hud = True
         args.no_detect_passes = True
@@ -164,7 +182,7 @@ def main() -> None:
     if args.debug_possession:
         render_cmd.append("--debug-possession")
 
-    run_step("final_render_roles_teams", render_cmd, summary)
+    run_step("final_render_roles_teams_possession", render_cmd, summary)
 
     summary["outputs"] = {
         "final_video": str(final_video) if final_video.exists() else None,
@@ -173,6 +191,7 @@ def main() -> None:
         "court_calibration": str(calibration),
         "team_calibration": str(team_calibration) if team_calibration and team_calibration.exists() else None,
         "role_model": str(role_model) if role_model else None,
+        "possession_model": str(possession_model) if possession_model else None,
         "possession_timeline": str(possession_json) if possession_json.exists() else None,
         "command_log": str(run_dir / "game_pipeline_commands.txt"),
     }
@@ -274,6 +293,19 @@ def role_model_candidates() -> list[Path]:
     return candidates
 
 
+def possession_model_candidates() -> list[Path]:
+    roots = [
+        ROOT / "runs" / "classify" / "runs" / "possession_cls",
+        ROOT / "runs" / "possession_cls",
+        ROOT / "runs" / "classify" / "possession_cls",
+    ]
+    candidates: list[Path] = []
+    for root in roots:
+        if root.exists():
+            candidates.extend(root.glob("**/weights/best.pt"))
+    return candidates
+
+
 def resolve_model(value: str | None, candidates: list[Path]) -> Path | None:
     if value is None or str(value).lower() in {"", "none", "false", "no"}:
         return None
@@ -326,12 +358,19 @@ def write_command_log(path: Path, steps: list[dict[str, Any]]) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def print_header(run_dir: Path, calibration: Path, role_model: Path | None, team_calibration: Path | None) -> None:
+def print_header(
+    run_dir: Path,
+    calibration: Path,
+    role_model: Path | None,
+    team_calibration: Path | None,
+    possession_model: Path | None,
+) -> None:
     print("\n=== Basketball CV game pipeline ===")
     print(f"Run directory: {run_dir}")
     print(f"Court calibration: {calibration}")
     print(f"Role model: {role_model if role_model else 'disabled/not found'}")
     print(f"Team calibration: {team_calibration if team_calibration else 'disabled'}")
+    print(f"Possession model: {possession_model if possession_model else 'disabled/not found'}")
     print("==================================\n")
 
 
