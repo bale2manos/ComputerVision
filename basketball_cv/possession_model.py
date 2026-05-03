@@ -16,7 +16,18 @@ from basketball_cv.events import _distance, _eligible_players, _player_key, _rec
 from basketball_cv.possession import ball_player_image_contact, best_non_dense_ball
 
 
-CONTROL_CLASSES = {"control", "has_ball", "player_with_ball", "dribble", "dribbling", "shoot", "shooting", "pass", "passing"}
+CONTROL_CLASSES = {
+    "control",
+    "has_ball",
+    "player_with_ball",
+    "dribble",
+    "dribbling",
+    "shot",
+    "shoot",
+    "shooting",
+    "pass",
+    "passing",
+}
 LOOSE_CLASSES = {"loose", "loose_ball", "contested", "divided", "no_control", "none"}
 
 
@@ -38,7 +49,7 @@ class PossessionClassifier:
 
     The expected model is a YOLO classification model trained on crops containing
     a candidate player and the detected ball. Supported class names are flexible:
-    control/has_ball/player_with_ball/dribble/shoot/pass are treated as control;
+    control/has_ball/player_with_ball/dribble/shot/shoot/pass are treated as control;
     loose/contested/no_control are treated as non-control.
     """
 
