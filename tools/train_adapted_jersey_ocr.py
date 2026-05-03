@@ -38,7 +38,7 @@ Optimizer:
   beta2: 0.999
   lr:
     name: Cosine
-    learning_rate: {learning_rate}
+    learning_rate: !!float {learning_rate}
   regularizer:
     name: L2
     factor: 0.00001
@@ -156,6 +156,7 @@ def main() -> None:
     save_inference_dir = output_dir / "inference"
     pretrained = args.pretrained_model or ""
     train_aug_block = "" if args.no_rec_aug else "      - RecAug:\n"
+    learning_rate = f"{float(args.learning_rate):.10f}".rstrip("0").rstrip(".")
 
     config = TEMPLATE_CONFIG.format(
         use_gpu=str(bool(args.use_gpu)).lower(),
@@ -164,7 +165,7 @@ def main() -> None:
         save_inference_dir=as_posix(save_inference_dir),
         pretrained_model=pretrained,
         dict_path=as_posix(dict_path),
-        learning_rate=args.learning_rate,
+        learning_rate=learning_rate,
         data_dir=as_posix(data_dir),
         train_list=as_posix(train_list),
         val_list=as_posix(val_list),
