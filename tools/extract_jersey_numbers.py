@@ -27,6 +27,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="runs/jersey_ocr", help="Output directory.")
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"], help="EasyOCR device preference.")
     parser.add_argument("--languages", nargs="+", default=["en"], help="EasyOCR language list.")
+    parser.add_argument("--ocr-engine", choices=["easyocr", "paddle", "both"], default="easyocr")
+    parser.add_argument("--paddle-rec-model-dir", default=None, help="Exported PaddleOCR recognition inference model directory.")
+    parser.add_argument("--paddle-rec-char-dict", default=None, help="PaddleOCR character dictionary, e.g. digit_dict.txt.")
+    parser.add_argument("--paddle-use-gpu", action="store_true", help="Use PaddleOCR GPU inference if available.")
+    parser.add_argument("--paddle-min-confidence", type=float, default=0.20)
     parser.add_argument("--max-crops-per-player", type=int, default=40, help="Max OCR crops sampled for each player.")
     parser.add_argument("--sample-step", type=int, default=6, help="Minimum frame gap between crops for the same player.")
     parser.add_argument("--min-box-height", type=float, default=115.0, help="Ignore smaller player boxes.")
@@ -48,7 +53,7 @@ def main() -> None:
     records = tracks.get("records", [])
     samples = select_samples(records, args.max_crops_per_player, args.sample_step, args.min_box_height, args.min_confidence)
 
-    reader = build_reader(args.languages, args.device)
+    readers = build_readers(args)
     cap = cv2.VideoCapture(args.video)
     if not cap.isOpened():
         raise SystemExit(f"Could not open video: {args.video}")
@@ -66,7 +71,7 @@ def main() -> None:
                 cv2.imwrite(str(player_crop_dir / f"f{int(rec['frame_index']):04d}_{sample_index:02d}_raw.jpg"), crop)
                 for variant_name, variant in variants:
                     cv2.imwrite(str(player_crop_dir / f"f{int(rec['frame_index']):04d}_{sample_index:02d}_{variant_name}.jpg"), variant)
-            votes = read_digits(reader, variants, args.min_ocr_confidence)
+            votes = read_digits(readers, variants, args)
             for vote in votes:
                 vote.update(
                     {
@@ -84,6 +89,9 @@ def main() -> None:
     cap.release()
 
     report = build_report(player_votes, samples)
+    report.setdefault("summary", {})["ocr_engine"] = args.ocr_engine
+    report["summary"]["ocr_sources"] = list(readers.keys())
+    report["summary"]["paddle_model_dir"] = args.paddle_rec_model_dir
     write_json(output_dir / "jersey_numbers.json", report)
     if args.player_summary:
         enrich_player_summary(Path(args.player_summary), output_dir / "player_summary_with_numbers.json", report)
@@ -91,7 +99,18 @@ def main() -> None:
     print(json.dumps(report["summary"], indent=2))
 
 
-def build_reader(languages: list[str], device: str) -> Any:
+def build_readers(args: argparse.Namespace) -> dict[str, Any]:
+    readers: dict[str, Any] = {}
+    if args.ocr_engine in {"easyocr", "both"}:
+        readers["easyocr"] = build_easyocr_reader(args.languages, args.device)
+    if args.ocr_engine in {"paddle", "both"}:
+        readers["paddle"] = build_paddle_reader(args)
+    if not readers:
+        raise SystemExit("No OCR reader configured.")
+    return readers
+
+
+def build_easyocr_reader(languages: list[str], device: str) -> Any:
     try:
         import easyocr
         import torch
@@ -100,6 +119,53 @@ def build_reader(languages: list[str], device: str) -> Any:
 
     gpu = device == "cuda" and torch.cuda.is_available()
     return easyocr.Reader(languages, gpu=gpu, verbose=False)
+
+
+def build_paddle_reader(args: argparse.Namespace) -> Any:
+    model_dir = Path(args.paddle_rec_model_dir) if args.paddle_rec_model_dir else None
+    char_dict = Path(args.paddle_rec_char_dict) if args.paddle_rec_char_dict else None
+    if model_dir is None or not model_dir.exists():
+        raise SystemExit("--paddle-rec-model-dir is required for --ocr-engine paddle/both and must exist.")
+    if char_dict is None or not char_dict.exists():
+        raise SystemExit("--paddle-rec-char-dict is required for --ocr-engine paddle/both and must exist.")
+    try:
+        from paddleocr import PaddleOCR
+    except ImportError as exc:
+        raise SystemExit("PaddleOCR is not installed in this Python environment.") from exc
+
+    common = {
+        "use_angle_cls": False,
+        "lang": "en",
+        "show_log": False,
+        "use_gpu": bool(args.paddle_use_gpu),
+    }
+    attempts = [
+        {
+            **common,
+            "det": False,
+            "rec": True,
+            "cls": False,
+            "rec_model_dir": str(model_dir),
+            "rec_char_dict_path": str(char_dict),
+        },
+        {
+            **common,
+            "text_recognition_model_dir": str(model_dir),
+            "text_rec_char_dict_path": str(char_dict),
+        },
+        {
+            "rec_model_dir": str(model_dir),
+            "rec_char_dict_path": str(char_dict),
+            "use_gpu": bool(args.paddle_use_gpu),
+        },
+    ]
+    last_exc: Exception | None = None
+    for kwargs in attempts:
+        try:
+            return PaddleOCR(**kwargs)
+        except Exception as exc:  # API changed between PaddleOCR versions.
+            last_exc = exc
+    raise SystemExit(f"Could not initialize PaddleOCR with adapted model: {last_exc}")
 
 
 def select_samples(
@@ -188,7 +254,16 @@ def preprocess_crop_variants(crop: np.ndarray) -> list[tuple[str, np.ndarray]]:
     ]
 
 
-def read_digits(reader: Any, variants: list[tuple[str, np.ndarray]], min_confidence: float) -> list[dict[str, Any]]:
+def read_digits(readers: dict[str, Any], variants: list[tuple[str, np.ndarray]], args: argparse.Namespace) -> list[dict[str, Any]]:
+    votes = []
+    if "easyocr" in readers:
+        votes.extend(read_digits_easyocr(readers["easyocr"], variants, args.min_ocr_confidence))
+    if "paddle" in readers:
+        votes.extend(read_digits_paddle(readers["paddle"], variants, args.paddle_min_confidence))
+    return votes
+
+
+def read_digits_easyocr(reader: Any, variants: list[tuple[str, np.ndarray]], min_confidence: float) -> list[dict[str, Any]]:
     votes = []
     for variant_name, image in variants:
         try:
@@ -216,9 +291,72 @@ def read_digits(reader: Any, variants: list[tuple[str, np.ndarray]], min_confide
                         "text": str(text),
                         "ocr_confidence": round(float(confidence), 4),
                         "variant": variant_name,
+                        "ocr_source": "easyocr",
                     }
                 )
     return votes
+
+
+def read_digits_paddle(reader: Any, variants: list[tuple[str, np.ndarray]], min_confidence: float) -> list[dict[str, Any]]:
+    votes = []
+    for variant_name, image in variants:
+        try:
+            try:
+                result = reader.ocr(image, det=False, cls=False)
+            except TypeError:
+                result = reader.ocr(image, det=False)
+        except Exception:
+            continue
+        for text, confidence in extract_text_conf_pairs(result):
+            for match in DIGIT_RE.findall(str(text)):
+                number = normalize_number(match)
+                if number is None or confidence < min_confidence:
+                    continue
+                votes.append(
+                    {
+                        "number": number,
+                        "text": str(text),
+                        "ocr_confidence": round(float(confidence), 4),
+                        "variant": variant_name,
+                        "ocr_source": "paddle",
+                    }
+                )
+    return votes
+
+
+def extract_text_conf_pairs(result: Any) -> list[tuple[str, float]]:
+    pairs: list[tuple[str, float]] = []
+
+    def walk(obj: Any) -> None:
+        if obj is None:
+            return
+        if isinstance(obj, dict):
+            text = obj.get("text") or obj.get("rec_text") or obj.get("label")
+            conf = obj.get("confidence") or obj.get("score") or obj.get("rec_score")
+            if text is not None and conf is not None:
+                try:
+                    pairs.append((str(text), float(conf)))
+                except Exception:
+                    pass
+            for value in obj.values():
+                if isinstance(value, (list, tuple, dict)):
+                    walk(value)
+            return
+        if isinstance(obj, (list, tuple)):
+            if len(obj) >= 2 and isinstance(obj[0], str) and isinstance(obj[1], (float, int, np.floating)):
+                pairs.append((str(obj[0]), float(obj[1])))
+                return
+            if len(obj) >= 2 and isinstance(obj[1], (list, tuple)) and len(obj[1]) >= 2 and isinstance(obj[1][0], str):
+                try:
+                    pairs.append((str(obj[1][0]), float(obj[1][1])))
+                    return
+                except Exception:
+                    pass
+            for item in obj:
+                walk(item)
+
+    walk(result)
+    return pairs
 
 
 def normalize_number(text: str) -> str | None:
@@ -288,7 +426,13 @@ def aggregate_frame_votes(votes: list[dict[str, Any]]) -> tuple[Counter[str], di
     for vote in votes:
         number = vote["number"]
         frame = int(vote["frame_index"])
-        per_frame[frame][number] = max(per_frame[frame][number], float(vote["ocr_confidence"]))
+        confidence = float(vote["ocr_confidence"])
+        source = vote.get("ocr_source")
+        # The adapted OCR is trained on our jersey crops. Give it a small boost,
+        # but still keep EasyOCR as a useful independent source when --ocr-engine both is used.
+        if source == "paddle":
+            confidence *= 1.12
+        per_frame[frame][number] = max(per_frame[frame][number], confidence)
 
     counts: Counter[str] = Counter()
     scores: dict[str, float] = defaultdict(float)
@@ -311,9 +455,6 @@ def choose_jersey_number(counts: Counter[str], scores: dict[str, float]) -> str 
     }
     if two_digit:
         best_two, best_two_score = max(two_digit.items(), key=lambda item: (item[1], counts[item[0]]))
-        # Back numbers are larger and more reliable than isolated single digits
-        # produced by folds, logos, or shorts. Do not require them to beat every
-        # single digit, only to have repeated support.
         if best_two_score >= best_any_score * 0.28 or counts[best_two] >= 5:
             return best_two
 
