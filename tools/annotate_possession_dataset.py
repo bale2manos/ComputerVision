@@ -32,9 +32,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Interactively label player-ball possession crops across many videos. "
-            "You choose the owner candidate in a sampled frame; the tool saves that crop "
-            "as control/dribble/shot/contested and automatically saves other candidates "
-            "as no_control."
+            "The tool draws numbered candidates near the detected ball. You can press 1-9 "
+            "or click a numbered candidate. The selected candidate is saved as the current "
+            "owner label and the other nearby candidates are saved as no_control."
         )
     )
     parser.add_argument("--videos", nargs="*", default=None, help="Video paths. If omitted, scans --video-root.")
@@ -57,6 +57,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-negative-candidates", action="store_true", default=True)
     parser.add_argument("--no-save-negative-candidates", action="store_false", dest="save_negative_candidates")
     parser.add_argument("--max-negatives-per-frame", type=int, default=4)
+    parser.add_argument("--draw-all-people", action="store_true", default=True)
+    parser.add_argument("--no-draw-all-people", action="store_false", dest="draw_all_people")
     parser.add_argument("--seed", type=int, default=7)
     return parser.parse_args()
 
@@ -150,11 +152,13 @@ def annotate_video(video: Path, tracks_path: Path, args: argparse.Namespace, out
         "last_candidates": [],
         "last_ball": None,
         "last_image": None,
+        "redraw_requested": False,
     }
 
     print(f"\n[video] {video.name} | tracks={tracks_path} | samples={len(frame_indices)} | fps={fps:.2f}")
     print_controls()
     cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
+    cv2.setMouseCallback(WINDOW, on_mouse, state)
 
     while 0 <= state["index"] < len(frame_indices):
         draw_current(state)
@@ -194,6 +198,42 @@ def annotate_video(video: Path, tracks_path: Path, args: argparse.Namespace, out
     cv2.destroyWindow(WINDOW)
 
 
+def on_mouse(event: int, x: int, y: int, _flags: int, state: dict[str, Any]) -> None:
+    if event != cv2.EVENT_LBUTTONDOWN:
+        return
+    candidates = state.get("last_candidates") or []
+    if not candidates:
+        print("[click] No numbered candidates in this frame. Press n to skip or x if it is loose/no owner.")
+        return
+    idx = nearest_candidate_index(candidates[:9], x, y)
+    if idx is None:
+        print("[click] Click closer to a numbered candidate box, or press its 1-9 key.")
+        return
+    save_owner_frame(state, idx)
+    state["index"] += 1
+    if 0 <= state["index"] < len(state["frame_indices"]):
+        draw_current(state)
+
+
+def nearest_candidate_index(candidates: list[dict[str, Any]], x: int, y: int) -> int | None:
+    best_idx = None
+    best_score = 1e9
+    for idx, player in enumerate(candidates):
+        bbox = player.get("bbox")
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            continue
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        inside = x1 <= x <= x2 and y1 <= y <= y2
+        cx = min(max(float(x), x1), x2)
+        cy = min(max(float(y), y1), y2)
+        dist = float(np.hypot(float(x) - cx, float(y) - cy))
+        score = -1.0 if inside else dist
+        if score < best_score and (inside or dist <= 90.0):
+            best_score = score
+            best_idx = idx
+    return best_idx
+
+
 def draw_current(state: dict[str, Any]) -> None:
     frame_idx = state["frame_indices"][state["index"]]
     cap: cv2.VideoCapture = state["cap"]
@@ -211,18 +251,21 @@ def draw_current(state: dict[str, Any]) -> None:
     state["last_image"] = frame
 
     out = frame.copy()
+    if state["args"].draw_all_people:
+        for person in [rec for rec in frame_records if rec.get("class_name") == "person"]:
+            draw_person_hint(out, person)
     if ball is not None:
-        draw_box(out, ball.get("bbox"), (0, 190, 255), "BALL")
+        draw_box(out, ball.get("bbox"), (0, 190, 255), "BALL", thickness=3)
     for i, player in enumerate(candidates[:9], start=1):
         color = (255, 180, 0) if i % 2 else (0, 220, 255)
         label = f"{i}: T{player.get('track_id')} P{player.get('player_id')} {player.get('team')}"
-        draw_box(out, player.get("bbox"), color, label)
+        draw_candidate_box(out, player.get("bbox"), color, label, i)
 
     panel = [
         f"{state['video'].name} | frame {frame_idx} | {state['index'] + 1}/{len(state['frame_indices'])} | t={frame_idx / max(state['fps'], 1e-6):.2f}s",
-        f"Current owner label: {state['current_label'].upper()}  | candidates: {len(candidates)} | ball: {'yes' if ball else 'no'}",
-        "Keys: c control, d dribble, s shot, t contested | 1-9 choose owner | x loose/no owner | n skip | p prev | j/l +/-10 | u undo | q quit",
-        "When you choose owner, other visible candidates are saved as no_control hard negatives.",
+        f"Current owner label: {state['current_label'].upper()}  | numbered candidates: {len(candidates)} | ball: {'yes' if ball else 'no'}",
+        "Use 1-9 OR CLICK a numbered box. c/d/s/t changes label. x = loose/no owner. n = skip.",
+        "Grey boxes are all detected people; ONLY yellow/cyan numbered boxes are selectable candidates.",
     ]
     draw_panel(out, panel)
     cv2.imshow(WINDOW, out)
@@ -370,11 +413,38 @@ def ensure_dataset_dirs(root: Path) -> None:
             (root / split / label).mkdir(parents=True, exist_ok=True)
 
 
-def draw_box(frame: np.ndarray, bbox: Any, color: tuple[int, int, int], label: str) -> None:
+def draw_person_hint(frame: np.ndarray, person: dict[str, Any]) -> None:
+    bbox = person.get("bbox")
     if not isinstance(bbox, list) or len(bbox) != 4:
         return
     x1, y1, x2, y2 = [int(round(float(v))) for v in bbox]
-    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
+    color = (135, 135, 135)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1, cv2.LINE_AA)
+    label = f"T{person.get('track_id')} P{person.get('player_id')} {person.get('team')}"
+    cv2.putText(frame, label, (x1, max(16, y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 2, cv2.LINE_AA)
+    cv2.putText(frame, label, (x1, max(16, y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.42, color, 1, cv2.LINE_AA)
+
+
+def draw_candidate_box(frame: np.ndarray, bbox: Any, color: tuple[int, int, int], label: str, number: int) -> None:
+    if not isinstance(bbox, list) or len(bbox) != 4:
+        return
+    x1, y1, x2, y2 = [int(round(float(v))) for v in bbox]
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 4, cv2.LINE_AA)
+    cx = int(round((x1 + x2) / 2))
+    cy = int(round(max(y1 + 22, y1 + 0.18 * (y2 - y1))))
+    cv2.circle(frame, (cx, cy), 22, (0, 0, 0), -1, cv2.LINE_AA)
+    cv2.circle(frame, (cx, cy), 20, color, -1, cv2.LINE_AA)
+    cv2.putText(frame, str(number), (cx - 8, cy + 8), cv2.FONT_HERSHEY_SIMPLEX, 0.82, (0, 0, 0), 3, cv2.LINE_AA)
+    cv2.putText(frame, str(number), (cx - 8, cy + 8), cv2.FONT_HERSHEY_SIMPLEX, 0.82, (255, 255, 255), 1, cv2.LINE_AA)
+    cv2.putText(frame, label, (x1, max(22, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 0, 0), 4, cv2.LINE_AA)
+    cv2.putText(frame, label, (x1, max(22, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.62, color, 2, cv2.LINE_AA)
+
+
+def draw_box(frame: np.ndarray, bbox: Any, color: tuple[int, int, int], label: str, thickness: int = 2) -> None:
+    if not isinstance(bbox, list) or len(bbox) != 4:
+        return
+    x1, y1, x2, y2 = [int(round(float(v))) for v in bbox]
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness, cv2.LINE_AA)
     cv2.putText(frame, label, (x1, max(18, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 0, 0), 4, cv2.LINE_AA)
     cv2.putText(frame, label, (x1, max(18, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.58, color, 2, cv2.LINE_AA)
 
@@ -395,7 +465,8 @@ def draw_panel(frame: np.ndarray, lines: list[str]) -> None:
 def print_controls() -> None:
     print("Controls:")
     print("  c/d/s/t: set owner label control/dribble/shot/contested")
-    print("  1-9: choose owner candidate; other candidates become no_control")
+    print("  1-9: choose numbered owner candidate")
+    print("  mouse click: choose nearest numbered candidate")
     print("  x: loose/no owner; candidates become no_control")
     print("  n or space: skip")
     print("  p: previous sample")
