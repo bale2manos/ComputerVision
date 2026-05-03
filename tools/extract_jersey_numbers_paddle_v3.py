@@ -6,13 +6,23 @@ This script reuses the existing jersey crop sampling/reporting logic from
 ``tools.extract_jersey_numbers`` but replaces PaddleOCR initialization and
 inference with a version that works with newer PaddleOCR releases, where args
 such as ``use_gpu``/``show_log``/``det`` are no longer accepted by ``PaddleOCR``.
+
+It also auto-adds ``external/PaddleOCR`` to ``sys.path``. This matters when
+PaddleOCR was cloned locally for training but not installed as a Python package
+in the active environment.
 """
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+LOCAL_PADDLEOCR = ROOT / "external" / "PaddleOCR"
+if LOCAL_PADDLEOCR.exists() and str(LOCAL_PADDLEOCR) not in sys.path:
+    sys.path.insert(0, str(LOCAL_PADDLEOCR))
 
 import extract_jersey_numbers as base
 
@@ -28,12 +38,19 @@ def build_paddle_reader_v3(args: argparse.Namespace) -> Any:
     try:
         from paddleocr import PaddleOCR
     except ImportError as exc:
-        raise SystemExit("PaddleOCR is not installed in this Python environment. Activate paddle_venv.") from exc
+        env = sys.executable
+        raise SystemExit(
+            "PaddleOCR is not importable in this Python environment.\n"
+            f"Python: {env}\n"
+            f"Tried local clone: {LOCAL_PADDLEOCR}\n"
+            "Fix: activate paddle_venv and either run from the repo root after git pull, "
+            "or install the local clone with: python -m pip install -e external\\PaddleOCR"
+        ) from exc
 
     device = "gpu:0" if getattr(args, "paddle_use_gpu", False) else "cpu"
 
-    # PaddleOCR v3 changed parameter names. Try modern args first, then older
-    # compatibility args without use_gpu/show_log, because those are rejected by v3.
+    # PaddleOCR changed parameter names across versions. Try modern v3 args first,
+    # then compatibility variants. v3 rejects use_gpu/show_log/det/rec/cls.
     attempts = [
         {
             "text_recognition_model_dir": str(model_dir),
@@ -57,12 +74,17 @@ def build_paddle_reader_v3(args: argparse.Namespace) -> Any:
             "use_angle_cls": False,
             "lang": "en",
         },
+        {
+            "rec_model_dir": str(model_dir),
+            "rec_char_dict_path": str(char_dict),
+        },
     ]
 
     errors: list[str] = []
     for kwargs in attempts:
         try:
             reader = PaddleOCR(**kwargs)
+            print(f"[paddle-v3] Python: {sys.executable}")
             print(f"[paddle-v3] Initialized PaddleOCR with args: {sorted(kwargs.keys())}")
             return reader
         except Exception as exc:
@@ -75,7 +97,6 @@ def read_digits_paddle_v3(reader: Any, variants: list[tuple[str, np.ndarray]], m
     votes: list[dict[str, Any]] = []
     for variant_name, image in variants:
         result = None
-        errors: list[str] = []
         calls = [
             ("predict", lambda: reader.predict(image)),
             ("ocr_det_false_cls_false", lambda: reader.ocr(image, det=False, cls=False)),
@@ -86,8 +107,8 @@ def read_digits_paddle_v3(reader: Any, variants: list[tuple[str, np.ndarray]], m
             try:
                 result = call()
                 break
-            except Exception as exc:
-                errors.append(str(exc))
+            except Exception:
+                continue
         if result is None:
             continue
 
@@ -128,7 +149,6 @@ def extract_text_conf_pairs_v3(result: Any) -> list[tuple[str, float]]:
             return
         seen_ids.add(obj_id)
 
-        # PaddleOCR v3 result objects usually expose json / to_dict-like data.
         for attr in ("json", "to_dict", "dict"):
             if hasattr(obj, attr):
                 try:
@@ -147,7 +167,6 @@ def extract_text_conf_pairs_v3(result: Any) -> list[tuple[str, float]]:
                 for text, score in zip(texts, scores):
                     maybe_add(text, score)
 
-            # Some PaddleOCR v3 objects are shaped like {'res': {'rec_text': ..., ...}}
             if "res" in obj:
                 walk(obj["res"])
             for value in obj.values():
