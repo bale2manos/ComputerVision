@@ -1,0 +1,30 @@
+# Unified environment for the basketball CV pipeline.
+# Recommended Python: 3.10 or 3.11 on Windows.
+# Install torch first with the CUDA 12.4 index, then install this file.
+
+numpy==1.26.4
+opencv-python>=4.10
+opencv-contrib-python>=4.10
+ultralytics>=8.3
+supervision>=0.25
+lapx>=0.5.2
+easyocr>=1.7
+
+# PaddleOCR / adapted jersey OCR dependencies.
+paddlepaddle>=3.0
+shapely
+scikit-image
+pyclipper
+lmdb
+rapidfuzz
+cython
+Pillow
+pyyaml
+requests
+albumentations
+albucore
+packaging
+
+# Utilities used by analysis/review scripts.
+matplotlib
+pandas
