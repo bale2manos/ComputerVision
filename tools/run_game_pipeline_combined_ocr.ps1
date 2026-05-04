@@ -1,0 +1,148 @@
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$Video,
+
+    [string]$RunName = "",
+    [string]$OutputRoot = "runs\pipeline",
+
+    [string]$VenvPython = ".\venv\Scripts\python.exe",
+    [string]$PaddlePython = ".\paddle_venv\Scripts\python.exe",
+
+    [string]$PaddleModelDir = "runs\jersey_ocr_paddle\inference",
+    [string]$PaddleCharDict = "datasets\jersey_ocr_paddle\digit_dict.txt",
+
+    [string]$Device = "0",
+    [switch]$NoPaddle,
+    [switch]$NoDebugPossession
+)
+
+$ErrorActionPreference = "Stop"
+$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+Set-Location $Root
+
+function Resolve-ExistingPath([string]$PathText, [string]$Label) {
+    if (!(Test-Path $PathText)) {
+        throw "$Label not found: $PathText"
+    }
+    return (Resolve-Path $PathText).Path
+}
+
+function Get-VideoStem([string]$VideoPath) {
+    return [System.IO.Path]::GetFileNameWithoutExtension($VideoPath)
+}
+
+function Get-LatestBestPt([string[]]$Roots) {
+    $files = @()
+    foreach ($root in $Roots) {
+        if (Test-Path $root) {
+            $files += Get-ChildItem -Path $root -Filter best.pt -Recurse -ErrorAction SilentlyContinue
+        }
+    }
+    if ($files.Count -eq 0) { return $null }
+    return ($files | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+}
+
+$VenvPython = Resolve-ExistingPath $VenvPython "Main venv python"
+$Video = Resolve-ExistingPath $Video "Video"
+
+if ([string]::IsNullOrWhiteSpace($RunName)) {
+    $RunName = "$(Get-VideoStem $Video)_game"
+}
+
+$RunDir = Join-Path (Join-Path $Root $OutputRoot) $RunName
+$DebugArgs = @()
+if (!$NoDebugPossession) { $DebugArgs += "--debug-possession" }
+
+Write-Host "`n=== STEP 1/4: base game pipeline + EasyOCR ===" -ForegroundColor Cyan
+& $VenvPython "tools\run_game_pipeline.py" `
+    --video $Video `
+    --output-root $OutputRoot `
+    --run-name $RunName `
+    --ball-model auto `
+    --role-model auto `
+    --possession-model auto `
+    --with-ocr `
+    --ocr-device cuda `
+    --save-crops `
+    --device $Device `
+    @DebugArgs
+if ($LASTEXITCODE -ne 0) { throw "Base game pipeline failed." }
+
+$EasyReport = Join-Path $RunDir "jerseys\jersey_numbers.json"
+$PaddleReport = Join-Path $RunDir "jerseys_paddle_v3\jersey_numbers.json"
+$CombinedReport = Join-Path $RunDir "jerseys_combined\jersey_numbers.json"
+$FinalCombinedVideo = Join-Path $RunDir "final_combined_ocr.mp4"
+
+if ($NoPaddle) {
+    Write-Host "`n[info] --NoPaddle set. Final output is EasyOCR render:" -ForegroundColor Yellow
+    Write-Host (Join-Path $RunDir "final_game_pipeline.mp4")
+    exit 0
+}
+
+if (!(Test-Path $PaddlePython)) {
+    Write-Host "`n[warn] paddle_venv python not found. Skipping adapted OCR:" -ForegroundColor Yellow
+    Write-Host "       $PaddlePython"
+    Write-Host "Final output is EasyOCR render: $(Join-Path $RunDir 'final_game_pipeline.mp4')"
+    exit 0
+}
+
+if (!(Test-Path $PaddleModelDir) -or !(Test-Path $PaddleCharDict)) {
+    Write-Host "`n[warn] Paddle OCR model/dict not found. Skipping adapted OCR." -ForegroundColor Yellow
+    Write-Host "       model: $PaddleModelDir"
+    Write-Host "       dict : $PaddleCharDict"
+    Write-Host "Final output is EasyOCR render: $(Join-Path $RunDir 'final_game_pipeline.mp4')"
+    exit 0
+}
+
+Write-Host "`n=== STEP 2/4: adapted PaddleOCR jersey extraction ===" -ForegroundColor Cyan
+& $PaddlePython "tools\extract_jersey_numbers_paddle_v3.py" `
+    --video $Video `
+    --tracks (Join-Path $RunDir "tracks.json") `
+    --player-summary (Join-Path $RunDir "player_summary.json") `
+    --output-dir (Join-Path $RunDir "jerseys_paddle_v3") `
+    --ocr-engine paddle `
+    --paddle-rec-model-dir $PaddleModelDir `
+    --paddle-rec-char-dict $PaddleCharDict `
+    --paddle-min-confidence 0.20 `
+    --max-crops-per-player 80 `
+    --sample-step 5 `
+    --save-crops
+if ($LASTEXITCODE -ne 0) { throw "Adapted PaddleOCR extraction failed." }
+
+if (!(Test-Path $PaddleReport)) {
+    throw "Paddle report was not generated: $PaddleReport"
+}
+
+Write-Host "`n=== STEP 3/4: combine EasyOCR + PaddleOCR reports ===" -ForegroundColor Cyan
+& $VenvPython "tools\combine_jersey_ocr_reports.py" `
+    --easyocr $EasyReport `
+    --paddle $PaddleReport `
+    --output $CombinedReport
+if ($LASTEXITCODE -ne 0) { throw "OCR report combination failed." }
+
+Write-Host "`n=== STEP 4/4: final render with combined OCR ===" -ForegroundColor Cyan
+$RoleModel = Get-LatestBestPt @("runs\classify\runs\person_roles", "runs\person_roles", "runs\classify\person_roles")
+$PossessionModel = Get-LatestBestPt @("runs\classify\runs\possession_cls", "runs\possession_cls", "runs\classify\possession_cls")
+
+$RenderArgs = @(
+    "tools\render_possession_with_model.py",
+    "--video", $Video,
+    "--tracks", (Join-Path $RunDir "tracks.json"),
+    "--calibration", (Join-Path $RunDir "court_calibration.json"),
+    "--events", (Join-Path $RunDir "events.json"),
+    "--team-calibration", (Join-Path $RunDir "team_calibration.json"),
+    "--jersey-numbers", $CombinedReport,
+    "--output", $FinalCombinedVideo,
+    "--output-possession", (Join-Path $RunDir "possession_timeline_combined_ocr.json")
+)
+if ($RoleModel) { $RenderArgs += @("--role-model", $RoleModel) }
+if ($PossessionModel) { $RenderArgs += @("--possession-model", $PossessionModel) }
+if (!$NoDebugPossession) { $RenderArgs += "--debug-possession" }
+
+& $VenvPython @RenderArgs
+if ($LASTEXITCODE -ne 0) { throw "Final combined render failed." }
+
+Write-Host "`nDONE" -ForegroundColor Green
+Write-Host "Run folder: $RunDir"
+Write-Host "Final video: $FinalCombinedVideo"
+Write-Host "Combined OCR: $CombinedReport"
