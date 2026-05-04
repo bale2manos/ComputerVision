@@ -46,25 +46,41 @@ function Get-LatestBestPt([string[]]$Roots) {
 }
 
 function Test-OpenCVGui([string]$PythonExe) {
+    # Do not pass multiline Python through -c; PowerShell can strip quotes from
+    # variable-expanded native args. Write a tiny temporary script instead.
+    $tmp = Join-Path $env:TEMP ("cv_gui_check_" + [System.Guid]::NewGuid().ToString("N") + ".py")
     $code = @'
 import cv2
 info = cv2.getBuildInformation()
-markers = ["GUI:                           NONE", "GUI:                            NONE", "GUI: NONE"]
-print("NO_GUI" if any(marker in info for marker in markers) else "GUI_OK")
+no_gui_markers = (
+    "GUI:                           NONE",
+    "GUI:                            NONE",
+    "GUI: NONE",
+)
+print("NO_GUI" if any(marker in info for marker in no_gui_markers) else "GUI_OK")
 '@
-    $result = & $PythonExe -c $code
-    if ($LASTEXITCODE -ne 0) { return $false }
-    return ($result -join "`n") -match "GUI_OK"
+    try {
+        Set-Content -Path $tmp -Value $code -Encoding UTF8
+        $result = & $PythonExe $tmp 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host ($result -join "`n") -ForegroundColor Yellow
+            return $false
+        }
+        return (($result -join "`n") -match "GUI_OK")
+    }
+    finally {
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Repair-OpenCV([string]$PythonExe) {
-    Write-Host "[preflight] Repairing OpenCV GUI package in main venv..." -ForegroundColor Yellow
+    Write-Host "[preflight] Repairing OpenCV GUI package in selected Python env..." -ForegroundColor Yellow
     & $PythonExe -m pip uninstall -y opencv-python-headless opencv-contrib-python-headless | Out-Host
-    & $PythonExe -m pip install --upgrade --force-reinstall opencv-python | Out-Host
+    & $PythonExe -m pip install --upgrade --force-reinstall opencv-python opencv-contrib-python | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "OpenCV reinstall failed." }
 }
 
-$VenvPython = Resolve-ExistingPath $VenvPython "Main venv python"
+$VenvPython = Resolve-ExistingPath $VenvPython "Main/unified venv python"
 $Video = Resolve-ExistingPath $Video "Video"
 
 if ([string]::IsNullOrWhiteSpace($RunName)) {
@@ -84,16 +100,19 @@ if (!$SkipCalibration -and !(Test-Path $CalibrationPath)) {
         }
         else {
             throw @"
-OpenCV in the main venv has no GUI/highgui support, so court calibration cannot open the click window.
+OpenCV in the selected Python env has no GUI/highgui support, so court calibration cannot open the click window.
 
-Run ONE of these:
+Selected Python:
+  $VenvPython
 
-  .\tools\run_game_pipeline_combined_ocr.ps1 -Video "$Video" -RunName "$RunName" -FixOpenCV
+Run:
+
+  .\tools\run_game_pipeline_combined_ocr.ps1 -Video "$Video" -RunName "$RunName" -VenvPython "$VenvPython" -PaddlePython "$PaddlePython" -FixOpenCV
 
 or manually:
 
-  .\venv\Scripts\python.exe -m pip uninstall -y opencv-python-headless opencv-contrib-python-headless
-  .\venv\Scripts\python.exe -m pip install --upgrade --force-reinstall opencv-python
+  $VenvPython -m pip uninstall -y opencv-python-headless opencv-contrib-python-headless
+  $VenvPython -m pip install --upgrade --force-reinstall opencv-python opencv-contrib-python
 
 If you already have a valid calibration at:
   $CalibrationPath
@@ -139,7 +158,7 @@ if ($NoPaddle) {
 }
 
 if (!(Test-Path $PaddlePython)) {
-    Write-Host "`n[warn] paddle_venv python not found. Skipping adapted OCR:" -ForegroundColor Yellow
+    Write-Host "`n[warn] Paddle python not found. Skipping adapted OCR:" -ForegroundColor Yellow
     Write-Host "       $PaddlePython"
     Write-Host "Final output is EasyOCR render: $(Join-Path $RunDir 'final_game_pipeline.mp4')"
     exit 0
