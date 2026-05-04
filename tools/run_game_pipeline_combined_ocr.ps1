@@ -13,7 +13,10 @@ param(
 
     [string]$Device = "0",
     [switch]$NoPaddle,
-    [switch]$NoDebugPossession
+    [switch]$NoDebugPossession,
+    [switch]$FixOpenCV,
+    [switch]$ReuseCalibration,
+    [switch]$SkipCalibration
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,6 +45,25 @@ function Get-LatestBestPt([string[]]$Roots) {
     return ($files | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
 }
 
+function Test-OpenCVGui([string]$PythonExe) {
+    $code = @'
+import cv2
+info = cv2.getBuildInformation()
+markers = ["GUI:                           NONE", "GUI:                            NONE", "GUI: NONE"]
+print("NO_GUI" if any(marker in info for marker in markers) else "GUI_OK")
+'@
+    $result = & $PythonExe -c $code
+    if ($LASTEXITCODE -ne 0) { return $false }
+    return ($result -join "`n") -match "GUI_OK"
+}
+
+function Repair-OpenCV([string]$PythonExe) {
+    Write-Host "[preflight] Repairing OpenCV GUI package in main venv..." -ForegroundColor Yellow
+    & $PythonExe -m pip uninstall -y opencv-python-headless opencv-contrib-python-headless | Out-Host
+    & $PythonExe -m pip install --upgrade --force-reinstall opencv-python | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "OpenCV reinstall failed." }
+}
+
 $VenvPython = Resolve-ExistingPath $VenvPython "Main venv python"
 $Video = Resolve-ExistingPath $Video "Video"
 
@@ -50,8 +72,44 @@ if ([string]::IsNullOrWhiteSpace($RunName)) {
 }
 
 $RunDir = Join-Path (Join-Path $Root $OutputRoot) $RunName
+$CalibrationPath = Join-Path $RunDir "court_calibration.json"
+
+if (!$SkipCalibration -and !(Test-Path $CalibrationPath)) {
+    if (!(Test-OpenCVGui $VenvPython)) {
+        if ($FixOpenCV) {
+            Repair-OpenCV $VenvPython
+            if (!(Test-OpenCVGui $VenvPython)) {
+                throw "OpenCV still has no GUI support after reinstall. Close/reopen PowerShell and retry."
+            }
+        }
+        else {
+            throw @"
+OpenCV in the main venv has no GUI/highgui support, so court calibration cannot open the click window.
+
+Run ONE of these:
+
+  .\tools\run_game_pipeline_combined_ocr.ps1 -Video "$Video" -RunName "$RunName" -FixOpenCV
+
+or manually:
+
+  .\venv\Scripts\python.exe -m pip uninstall -y opencv-python-headless opencv-contrib-python-headless
+  .\venv\Scripts\python.exe -m pip install --upgrade --force-reinstall opencv-python
+
+If you already have a valid calibration at:
+  $CalibrationPath
+run with:
+  -ReuseCalibration
+"@
+        }
+    }
+}
+
 $DebugArgs = @()
 if (!$NoDebugPossession) { $DebugArgs += "--debug-possession" }
+
+$CalibrationArgs = @()
+if ($ReuseCalibration) { $CalibrationArgs += "--reuse-calibration" }
+if ($SkipCalibration) { $CalibrationArgs += "--skip-calibration" }
 
 Write-Host "`n=== STEP 1/4: base game pipeline + EasyOCR ===" -ForegroundColor Cyan
 & $VenvPython "tools\run_game_pipeline.py" `
@@ -65,6 +123,7 @@ Write-Host "`n=== STEP 1/4: base game pipeline + EasyOCR ===" -ForegroundColor C
     --ocr-device cuda `
     --save-crops `
     --device $Device `
+    @CalibrationArgs `
     @DebugArgs
 if ($LASTEXITCODE -ne 0) { throw "Base game pipeline failed." }
 
