@@ -2,6 +2,12 @@
 
 Primer prototipo para convertir video de baloncesto en detecciones, tracking, pista 2D y candidatos de bloqueo directo.
 
+Pipeline oficial recomendado:
+
+```powershell
+python tools/run_game_pipeline.py --video "subra.mp4" --output-root runs/pipeline --run-name subra_game --with-ocr --device 0 --debug-possession
+```
+
 ## 1. Calibrar la pista
 
 La calibracion genera la homografia de pixeles a metros de pista.

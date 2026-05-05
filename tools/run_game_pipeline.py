@@ -15,8 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "One-command basketball CV pipeline: court calibration, tracking, ball model, "
-            "optional team calibration, role classifier, OCR, possession classifier, and final render."
+            "Official basketball CV pipeline entrypoint: court calibration, tracking, "
+            "identity-stable jersey OCR, possession, passes, and final render."
         )
     )
     parser.add_argument("--video", required=True)
