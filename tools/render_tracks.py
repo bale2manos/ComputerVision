@@ -81,7 +81,7 @@ def apply_jersey_numbers(records: list[dict[str, Any]], jersey_numbers_path: Pat
     numbers = {
         int(player["player_id"]): player
         for player in report.get("players", [])
-        if player.get("jersey_number") is not None
+        if _player_can_backfill_identity(player)
     }
     for rec in records:
         player_id = rec.get("player_id")
@@ -90,13 +90,21 @@ def apply_jersey_numbers(records: list[dict[str, Any]], jersey_numbers_path: Pat
         if int(player_id) in conflicting_player_ids:
             rec["identity_conflict"] = "player_contains_multiple_jersey_identities"
             continue
+        if rec.get("identity_conflict"):
+            continue
         number_info = numbers.get(int(player_id))
         if number_info is not None:
             if rec.get("jersey_identity"):
                 continue
-            rec["jersey_number"] = str(number_info["jersey_number"])
-            rec["jersey_identity"] = number_info.get("jersey_identity")
-            rec["canonical_player_id"] = number_info.get("canonical_player_id")
+            canonical_number = number_info.get("canonical_jersey_number", number_info.get("jersey_number"))
+            rec["jersey_number"] = str(canonical_number)
+            identity = number_info.get("jersey_identity")
+            if identity is None and number_info.get("team"):
+                identity = f"{number_info['team']}_{canonical_number}"
+            if identity is not None:
+                rec["jersey_identity"] = identity
+            rec["canonical_player_id"] = number_info.get("canonical_player_id", number_info["player_id"])
+            rec["identity_source"] = "ocr_canonical_identity"
 
 
 def apply_identity_segments(records: list[dict[str, Any]], identity_segments: list[dict[str, Any]]) -> None:
@@ -132,6 +140,8 @@ def apply_identity_segments(records: list[dict[str, Any]], identity_segments: li
                 int(item.get("vote_count", 0)),
             ),
         )
+        if segment.get("backfill_allowed") is False:
+            rec["identity_conflict"] = "segment_backfill_blocked"
         team = segment.get("team")
         number = segment.get("jersey_number")
         identity = segment.get("jersey_identity") or (f"{team}_{number}" if team and number is not None else None)
@@ -144,6 +154,12 @@ def apply_identity_segments(records: list[dict[str, Any]], identity_segments: li
         if segment.get("canonical_track_id") is not None:
             rec["canonical_track_id"] = segment["canonical_track_id"]
         rec["identity_source"] = "ocr_track_segment"
+
+
+def _player_can_backfill_identity(player: dict[str, Any]) -> bool:
+    if "canonical_jersey_number" in player or "jersey_locked" in player:
+        return player.get("canonical_jersey_number") is not None and bool(player.get("jersey_locked"))
+    return player.get("jersey_number") is not None
 
 
 def _segment_applies_to_frame(segment: dict[str, Any], frame: int, margin_frames: int = 45) -> bool:
@@ -170,8 +186,18 @@ def backfill_jersey_identities_across_fragments(
     min_candidate_frames: int = 20,
 ) -> int:
     segments = summarize_record_segments(records)
-    labeled = [segment for segment in segments if segment.get("jersey_identity") and len(str(segment.get("jersey_number", ""))) >= 2]
-    unlabeled = [segment for segment in segments if not segment.get("jersey_identity")]
+    labeled = [
+        segment
+        for segment in segments
+        if segment.get("jersey_identity")
+        and len(str(segment.get("jersey_number", ""))) >= 2
+        and not segment.get("has_identity_conflict")
+    ]
+    unlabeled = [
+        segment
+        for segment in segments
+        if not segment.get("jersey_identity") and not segment.get("has_identity_conflict")
+    ]
     backfills: dict[int, dict[str, Any]] = {}
 
     for source in sorted(labeled, key=lambda item: int(item["first_frame"])):
@@ -212,6 +238,8 @@ def backfill_jersey_identities_across_fragments(
         track_id = int(rec["track_id"])
         backfill = backfills.get(track_id)
         if backfill is None:
+            continue
+        if rec.get("identity_conflict"):
             continue
         source = backfill["source"]
         rec["team"] = source["team"]
@@ -281,6 +309,7 @@ def summarize_record_segments(records: list[dict[str, Any]]) -> list[dict[str, A
                 "first_pos": np.asarray([first["court_x"], first["court_y"]], dtype=np.float32),
                 "last_pos": np.asarray([last["court_x"], last["court_y"]], dtype=np.float32),
                 "embedding": embedding,
+                "has_identity_conflict": any(rec.get("identity_conflict") for rec in track_records),
             }
         )
     return segments
