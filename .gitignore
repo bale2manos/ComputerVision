@@ -23,13 +23,14 @@
 runs/
 previews/
 datasets/
+.worktrees/
 
 # System files
 .DS_Store
 __pycache__/
 *.pyc
 *.pyo
-.venv/
+.venv*/
 venv/
 .env
 paddle_venv/
