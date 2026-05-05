@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from basketball_cv.jersey_identity import JerseyIdentityConfig, resolve_player_identity
+
 
 DIGIT_RE = re.compile(r"\d{1,2}")
 
@@ -373,30 +375,33 @@ def normalize_number(text: str) -> str | None:
 
 def build_report(player_votes: dict[int, list[dict[str, Any]]], samples: dict[int, list[dict[str, Any]]]) -> dict[str, Any]:
     players = []
+    identity_segments = []
+    resolver_config = JerseyIdentityConfig()
     for player_id in sorted(samples):
         votes = player_votes.get(player_id, [])
-        counts, scores = aggregate_frame_votes(votes)
-
-        best_number = choose_jersey_number(counts, scores)
         sample_frames = [int(rec["frame_index"]) for rec in samples[player_id]]
-
         sample_teams = Counter(str(rec.get("team")) for rec in samples[player_id] if rec.get("team"))
+        team = sample_teams.most_common(1)[0][0] if sample_teams else None
+        resolved = resolve_player_identity(player_id=player_id, team=team, votes=votes, config=resolver_config)
         players.append(
             {
                 "player_id": player_id,
-                "team": sample_teams.most_common(1)[0][0] if sample_teams else None,
-                "jersey_number": best_number,
+                "team": team,
+                "jersey_number": resolved["canonical_jersey_number"],
+                "canonical_jersey_number": resolved["canonical_jersey_number"],
+                "display_jersey_number": resolved["display_jersey_number"],
+                "jersey_locked": resolved["jersey_locked"],
                 "first_sample_frame": min(sample_frames) if sample_frames else None,
                 "last_sample_frame": max(sample_frames) if sample_frames else None,
                 "sample_count": len(samples[player_id]),
                 "vote_count": len(votes),
-                "frame_votes": dict(counts),
-                "score_by_number": {number: round(float(score), 4) for number, score in sorted(scores.items())},
+                "frame_votes": resolved["frame_votes"],
+                "score_by_number": resolved["score_by_number"],
                 "raw_votes": votes[:40],
             }
         )
+        identity_segments.extend(resolved["segments"])
 
-    identity_segments = build_identity_segments(player_votes)
     apply_canonical_jersey_identities(players)
     apply_canonical_segment_identities(identity_segments, players)
     identity_conflicts = detect_identity_conflicts(players, identity_segments)
@@ -419,51 +424,6 @@ def build_report(player_votes: dict[int, list[dict[str, Any]]], samples: dict[in
         "identity_segments": identity_segments,
         "identity_conflicts": identity_conflicts,
     }
-
-
-def aggregate_frame_votes(votes: list[dict[str, Any]]) -> tuple[Counter[str], dict[str, float]]:
-    per_frame: dict[int, dict[str, float]] = defaultdict(lambda: defaultdict(float))
-    for vote in votes:
-        number = vote["number"]
-        frame = int(vote["frame_index"])
-        confidence = float(vote["ocr_confidence"])
-        source = vote.get("ocr_source")
-        # The adapted OCR is trained on our jersey crops. Give it a small boost,
-        # but still keep EasyOCR as a useful independent source when --ocr-engine both is used.
-        if source == "paddle":
-            confidence *= 1.12
-        per_frame[frame][number] = max(per_frame[frame][number], confidence)
-
-    counts: Counter[str] = Counter()
-    scores: dict[str, float] = defaultdict(float)
-    for frame_scores in per_frame.values():
-        for number, score in frame_scores.items():
-            counts[number] += 1
-            scores[number] += score
-    return counts, scores
-
-
-def choose_jersey_number(counts: Counter[str], scores: dict[str, float]) -> str | None:
-    if not scores:
-        return None
-
-    best_any, best_any_score = max(scores.items(), key=lambda item: (item[1], counts[item[0]]))
-    two_digit = {
-        number: score
-        for number, score in scores.items()
-        if len(number) == 2 and counts[number] >= 2 and score >= 2.0
-    }
-    if two_digit:
-        best_two, best_two_score = max(two_digit.items(), key=lambda item: (item[1], counts[item[0]]))
-        if best_two_score >= best_any_score * 0.28 or counts[best_two] >= 5:
-            return best_two
-
-    second_score = max([score for number, score in scores.items() if number != best_any], default=0.0)
-    if len(best_any) == 1 and counts[best_any] >= 4 and best_any_score >= 2.4 and best_any_score >= second_score * 1.35:
-        return best_any
-    if len(best_any) == 2 and counts[best_any] >= 2 and best_any_score >= 1.0 and best_any_score >= second_score * 1.15:
-        return best_any
-    return None
 
 
 def apply_canonical_jersey_identities(players: list[dict[str, Any]]) -> None:
@@ -494,95 +454,6 @@ def apply_canonical_jersey_identities(players: list[dict[str, Any]]) -> None:
             player["jersey_identity"] = identity
             player["canonical_player_id"] = canonical["player_id"]
             player["same_jersey_player_ids"] = merged_ids
-
-
-def build_identity_segments(player_votes: dict[int, list[dict[str, Any]]]) -> list[dict[str, Any]]:
-    grouped: dict[tuple[int, str], list[dict[str, Any]]] = defaultdict(list)
-    for player_id, votes in player_votes.items():
-        for vote in votes:
-            track_id = vote.get("track_id")
-            team = vote.get("team")
-            if track_id is None or team is None:
-                continue
-            vote = dict(vote)
-            vote["player_id"] = player_id
-            grouped[(int(track_id), str(team))].append(vote)
-
-    segments = []
-    for (track_id, team), votes in sorted(grouped.items()):
-        counts, scores = aggregate_frame_votes(votes)
-        best_number = choose_jersey_number(counts, scores)
-        strong_numbers = strong_segment_numbers(counts, scores)
-        if best_number is not None and best_number not in strong_numbers:
-            strong_numbers.insert(0, best_number)
-
-        if len(strong_numbers) <= 1:
-            segments.append(make_identity_segment(track_id, team, votes, best_number, apply_to_full_track=True))
-            continue
-
-        for number in strong_numbers:
-            number_votes = [vote for vote in votes if vote.get("number") == number]
-            if not number_votes:
-                continue
-            segment = make_identity_segment(track_id, team, number_votes, number, apply_to_full_track=False)
-            segment["track_conflicting_numbers"] = strong_numbers
-            segments.append(segment)
-    return segments
-
-
-def strong_segment_numbers(counts: Counter[str], scores: dict[str, float]) -> list[str]:
-    two_digit = {
-        number: score
-        for number, score in scores.items()
-        if len(number) == 2 and counts[number] >= 2 and score >= 1.0
-    }
-    if two_digit:
-        best_score = max(two_digit.values())
-        return [
-            number
-            for number, score in sorted(two_digit.items(), key=lambda item: item[1], reverse=True)
-            if score >= max(2.0, best_score * 0.45)
-        ]
-
-    one_digit = {
-        number: score
-        for number, score in scores.items()
-        if len(number) == 1 and counts[number] >= 6 and score >= 3.0
-    }
-    if not one_digit:
-        return []
-    best_score = max(one_digit.values())
-    return [
-        number
-        for number, score in sorted(one_digit.items(), key=lambda item: item[1], reverse=True)
-        if score >= best_score * 0.55
-    ]
-
-
-def make_identity_segment(
-    track_id: int,
-    team: str,
-    votes: list[dict[str, Any]],
-    jersey_number: str | None,
-    apply_to_full_track: bool,
-) -> dict[str, Any]:
-    counts, scores = aggregate_frame_votes(votes)
-    frames = [int(vote["frame_index"]) for vote in votes]
-    player_ids = sorted({int(vote["player_id"]) for vote in votes})
-    return {
-        "track_id": track_id,
-        "team": team,
-        "player_ids": player_ids,
-        "jersey_number": jersey_number,
-        "jersey_identity": f"{team}_{jersey_number}" if jersey_number is not None else None,
-        "first_vote_frame": min(frames) if frames else None,
-        "last_vote_frame": max(frames) if frames else None,
-        "apply_to_full_track": apply_to_full_track,
-        "vote_count": len(votes),
-        "frame_votes": dict(counts),
-        "score_by_number": {number: round(float(score), 4) for number, score in sorted(scores.items())},
-        "raw_votes": votes[:30],
-    }
 
 
 def apply_canonical_segment_identities(segments: list[dict[str, Any]], players: list[dict[str, Any]]) -> None:
