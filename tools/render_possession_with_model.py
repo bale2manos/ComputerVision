@@ -68,6 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-interpolation-gap", type=int, default=75)
     parser.add_argument("--debug-possession", action="store_true")
     parser.add_argument("--no-possession-hud", action="store_true")
+    parser.add_argument("--no-minimap", action="store_true")
     return parser.parse_args()
 
 
@@ -163,6 +164,7 @@ def main() -> None:
         court_spec,
         events=events,
         show_possession_hud=not args.no_possession_hud,
+        show_minimap=not args.no_minimap,
         debug_possession=args.debug_possession,
     )
     print(output_path.resolve())

@@ -230,8 +230,9 @@ def draw_person_record(frame: np.ndarray, rec: dict[str, Any]) -> None:
     x1, y1, x2, y2 = [int(round(float(v))) for v in bbox]
     color = team_color(rec)
     has_ball = bool(rec.get("has_ball"))
+    is_estimated = bool(rec.get("is_estimated") or rec.get("source") == "interpolated_player_gap")
     role = str(rec.get("role") or "")
-    thickness = 4 if has_ball else 2
+    thickness = 1 if is_estimated else (4 if has_ball else 2)
 
     # Subtle translucent bbox fill for the ball owner only.
     if has_ball:
@@ -239,6 +240,10 @@ def draw_person_record(frame: np.ndarray, rec: dict[str, Any]) -> None:
         cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)
         frame[:] = cv2.addWeighted(overlay, 0.12, frame, 0.88, 0)
         cv2.rectangle(frame, (x1 - 4, y1 - 4), (x2 + 4, y2 + 4), (0, 220, 255), 3, cv2.LINE_AA)
+    elif is_estimated:
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)
+        frame[:] = cv2.addWeighted(overlay, 0.05, frame, 0.95, 0)
 
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness, cv2.LINE_AA)
     label = person_label(rec)
@@ -277,6 +282,8 @@ def person_label(rec: dict[str, Any]) -> str:
         base = "player"
     if rec.get("identity_override"):
         base += " ✓"
+    if rec.get("is_estimated") or rec.get("source") == "interpolated_player_gap":
+        base += " est"
     return f"{base} {team}".strip()
 
 
@@ -370,13 +377,13 @@ def draw_record_on_minimap(
     color: tuple[int, int, int],
     possession: dict[str, Any] | None,
 ) -> None:
-    if rec.get("court_x") is None or rec.get("court_y") is None:
+    court_x = rec.get("court_x_smooth", rec.get("court_x"))
+    court_y = rec.get("court_y_smooth", rec.get("court_y"))
+    if court_x is None or court_y is None:
         return
 
     is_possessed_ball = rec.get("class_name") == "sports ball" and rec.get("ball_owner_player_id") is not None
     has_ball = bool(rec.get("has_ball")) and rec.get("class_name") == "person"
-    court_x = rec.get("court_x")
-    court_y = rec.get("court_y")
     if is_possessed_ball and rec.get("possession_court_x") is not None and rec.get("possession_court_y") is not None:
         court_x = float(rec["possession_court_x"]) + 0.18
         court_y = float(rec["possession_court_y"]) + 0.18
@@ -386,6 +393,12 @@ def draw_record_on_minimap(
     if rec.get("class_name") == "sports ball":
         cv2.circle(minimap, (x, y), 6, (0, 210, 255), -1, cv2.LINE_AA)
         cv2.circle(minimap, (x, y), 8, (0, 0, 0), 1, cv2.LINE_AA)
+        return
+
+    if rec.get("class_name") == "person" and (rec.get("is_estimated") or rec.get("source") == "interpolated_player_gap"):
+        radius = 5
+        cv2.circle(minimap, (x, y), radius + 2, (0, 0, 0), 1, cv2.LINE_AA)
+        cv2.circle(minimap, (x, y), radius, color, 1, cv2.LINE_AA)
         return
 
     radius = 8 if has_ball else 6

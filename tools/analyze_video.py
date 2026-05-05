@@ -59,6 +59,22 @@ TEAM_COLORS = {
 }
 
 
+def refresh_player_summary(
+    records: list[dict[str, Any]],
+    base_report: dict[str, Any] | None = None,
+    crossing_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    has_player_ids = any(rec.get("class_name") == "person" and rec.get("player_id") is not None for rec in records)
+    if not has_player_ids:
+        report = dict(base_report or {})
+        if crossing_report is not None:
+            report["id_switch_correction_count"] = crossing_report.get("correction_count", 0)
+            report["id_switch_corrections"] = crossing_report.get("corrections", [])
+            report["id_switch_correction_parameters"] = crossing_report.get("parameters", {})
+        return report
+    return summarize_players_from_records(records, base_report, crossing_report)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Track basketball players/ball and export a top-down minimap.")
     parser.add_argument("--video", required=True, help="Input video path.")
@@ -202,9 +218,10 @@ def main() -> None:
             min_appearance_improvement=args.crossing_min_appearance_improvement,
             max_appearance_motion_penalty_m=args.crossing_max_appearance_motion_penalty,
         )
-        stitch_report = summarize_players_from_records(records, stitch_report, crossing_report)
+        stitch_report = refresh_player_summary(records, stitch_report, crossing_report)
     gap_report = interpolate_player_gaps(records, fps=fps, max_gap_frames=max(2, int(round(0.32 * fps))))
     smooth_player_positions(records, window=5)
+    stitch_report = refresh_player_summary(records, stitch_report, crossing_report)
     mark_in_play_players(records, max_players=args.in_play_players)
     update_track_report_in_play(track_report, records)
     ball_interpolation_report = interpolate_ball_gaps(records, fps)

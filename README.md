@@ -8,6 +8,8 @@ Pipeline oficial recomendado:
 python tools/run_game_pipeline.py --video "subra.mp4" --output-root runs/pipeline --run-name subra_game --with-ocr --device 0 --debug-possession
 ```
 
+Ese es el unico flujo oficial soportado de extremo a extremo: `tools/run_game_pipeline.py` encadena analisis, OCR opcional y render final. Los comandos sueltos de abajo quedan como utilidades para calibrar, depurar o relanzar una etapa concreta sin contradecir ese flujo principal.
+
 ## 1. Calibrar la pista
 
 La calibracion genera la homografia de pixeles a metros de pista.
@@ -113,6 +115,8 @@ Los pases solo seran buenos si el balon se detecta de forma consistente. Sin un 
 
 ## 5. OCR de dorsales
 
+El flujo oficial para OCR y render final sigue siendo `python tools/run_game_pipeline.py --with-ocr ...`. Los comandos de esta seccion sirven para inspeccion, depuracion o reruns parciales cuando hace falta mirar una etapa por separado.
+
 Primero genera tracks con el analizador. Despues extrae dorsales por jugador:
 
 ```powershell
@@ -133,7 +137,7 @@ Para este clip hay una correccion supervisada de identidad revisada visualmente:
 python tools/render_tracks.py --video "2026-04-27 13-40-33.mp4" --tracks runs/stable/tracks.json --calibration config/court_calibration.json --jersey-numbers runs/stable_ocr/jersey_numbers.json --identity-overrides config/identity_overrides_2026-04-27.json --output runs/stable/annotated_numbers_overrides.mp4
 ```
 
-Por defecto el render interpola huecos cortos de dorsales estables de dos cifras. Si `#42` aparece antes y despues de un hueco, se dibuja una caja estimada durante los frames perdidos. Puedes desactivarlo con `--no-interpolate-jersey-gaps` o ajustar `--max-interpolation-gap`.
+Por defecto el render interpola huecos cortos de dorsales estables de dos cifras. Si `#42` aparece antes y despues de un hueco, se dibuja una caja estimada durante los frames perdidos. Esas cajas existen solo para continuidad visual del render: no cuentan como evidencia OCR, no anaden lecturas nuevas y no deben interpretarse como una observacion real del dorsal en esos frames. Puedes desactivarlo con `--no-interpolate-jersey-gaps` o ajustar `--max-interpolation-gap`.
 
 El OCR usa EasyOCR con allowlist de digitos. Se agregan varias lecturas por frame y luego varios frames por jugador, para evitar que una lectura aislada cambie el dorsal. Ademas se exportan `identity_segments`: votos de dorsal por `track_id`/equipo. El render usa esos segmentos antes que el dorsal agregado por `player_id`, asi que si un `player_id` mezcla a #42 y #93 tras un cruce, el dorsal no se propaga a todo el jugador equivocado. Si el mismo dorsal de un digito aparece en varios jugadores del mismo equipo, solo se conserva el candidato mas fuerte y los demas vuelven a `P{id}`. Los dorsales de dos cifras pueden agrupar fragmentos, por ejemplo `dark_42`.
 

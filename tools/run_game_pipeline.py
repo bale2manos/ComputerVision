@@ -12,6 +12,31 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _has_renderable_jersey(player: dict[str, Any]) -> bool:
+    if "jersey_number" in player:
+        return player.get("jersey_number") is not None
+    if "canonical_jersey_number" in player:
+        return bool(player.get("jersey_locked")) and player.get("canonical_jersey_number") is not None
+    return bool(player.get("jersey_locked"))
+
+
+def collect_pipeline_metrics(tracks_path: Path, jersey_numbers_path: Path | None) -> dict[str, int]:
+    payload = json.loads(tracks_path.read_text(encoding="utf-8")) if tracks_path.exists() else {}
+    tracks = payload if isinstance(payload, list) else payload.get("records", [])
+    estimated_player_frames = sum(1 for rec in tracks if rec.get("class_name") == "person" and rec.get("is_estimated"))
+    metrics = {
+        "estimated_player_frames": estimated_player_frames,
+        "short_gap_fills": estimated_player_frames,
+        "players_with_locked_jersey": 0,
+        "jersey_conflicts": 0,
+    }
+    if jersey_numbers_path and jersey_numbers_path.exists():
+        report = json.loads(jersey_numbers_path.read_text(encoding="utf-8"))
+        metrics["players_with_locked_jersey"] = sum(1 for player in report.get("players", []) if _has_renderable_jersey(player))
+        metrics["jersey_conflicts"] = len(report.get("identity_conflicts", []))
+    return metrics
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -209,6 +234,7 @@ def main() -> None:
         "possession_timeline": str(possession_json) if possession_json.exists() else None,
         "command_log": str(run_dir / "game_pipeline_commands.txt"),
     }
+    summary["metrics"] = collect_pipeline_metrics(tracks, jersey_numbers)
     write_command_log(run_dir / "game_pipeline_commands.txt", summary["steps"])
     (run_dir / "game_pipeline_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 

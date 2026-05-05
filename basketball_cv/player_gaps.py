@@ -84,7 +84,7 @@ def interpolate_player_gaps(
     return {"short_gap_fills": len(synthetic), "estimated_player_frames": len(synthetic)}
 
 
-def smooth_player_positions(records: list[dict[str, Any]], window: int = 5) -> None:
+def smooth_player_positions(records: list[dict[str, Any]], window: int = 5, max_frame_gap: int = 1) -> None:
     by_player: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for rec in records:
         if rec.get("class_name") == "person" and rec.get("player_id") is not None and rec.get("court_x") is not None and rec.get("court_y") is not None:
@@ -93,13 +93,24 @@ def smooth_player_positions(records: list[dict[str, Any]], window: int = 5) -> N
     radius = max(0, window // 2)
     for player_records in by_player.values():
         player_records.sort(key=lambda rec: int(rec["frame_index"]))
-        xs = [float(rec["court_x"]) for rec in player_records]
-        ys = [float(rec["court_y"]) for rec in player_records]
-        for index, rec in enumerate(player_records):
-            lo = max(0, index - radius)
-            hi = min(len(player_records), index + radius + 1)
-            rec["court_x_smooth"] = round(sum(xs[lo:hi]) / float(hi - lo), 3)
-            rec["court_y_smooth"] = round(sum(ys[lo:hi]) / float(hi - lo), 3)
+        runs: list[list[dict[str, Any]]] = []
+        current_run: list[dict[str, Any]] = []
+        for rec in player_records:
+            if current_run and int(rec["frame_index"]) - int(current_run[-1]["frame_index"]) > max_frame_gap:
+                runs.append(current_run)
+                current_run = []
+            current_run.append(rec)
+        if current_run:
+            runs.append(current_run)
+
+        for run in runs:
+            xs = [float(rec["court_x"]) for rec in run]
+            ys = [float(rec["court_y"]) for rec in run]
+            for index, rec in enumerate(run):
+                lo = max(0, index - radius)
+                hi = min(len(run), index + radius + 1)
+                rec["court_x_smooth"] = round(sum(xs[lo:hi]) / float(hi - lo), 3)
+                rec["court_y_smooth"] = round(sum(ys[lo:hi]) / float(hi - lo), 3)
 
 
 def _bbox_is_compatible(prev_bbox: list[float], next_bbox: list[float], max_size_delta: float = 0.35, max_aspect_delta: float = 0.28) -> bool:
