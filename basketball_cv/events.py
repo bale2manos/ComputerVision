@@ -330,6 +330,7 @@ def detect_pick_and_rolls(records: list[dict[str, Any]], fps: float, config: Pic
             r
             for r in frame_records
             if r.get("class_name") == "person"
+            and not r.get("is_estimated")
             and r.get("in_play_player", r.get("player_candidate"))
             and r.get("track_id") is not None
             and r.get("team") not in (None, "unknown")
@@ -377,6 +378,7 @@ def _eligible_players(frame_records: list[dict[str, Any]]) -> list[dict[str, Any
         r
         for r in frame_records
         if r.get("class_name") == "person"
+        and not r.get("is_estimated")
         and r.get("in_play_player", r.get("player_candidate"))
         and _player_key(r) is not None
         and r.get("team") not in (None, "unknown")

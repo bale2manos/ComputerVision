@@ -181,6 +181,8 @@ def select_samples(
     for rec in records:
         if rec.get("class_name") != "person" or rec.get("player_id") is None:
             continue
+        if rec.get("is_estimated"):
+            continue
         if rec.get("confidence", 0.0) < min_confidence:
             continue
         if rec.get("bottom_truncated"):

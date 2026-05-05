@@ -29,6 +29,7 @@ from basketball_cv.events import (
     detect_pick_and_rolls,
     interpolate_ball_gaps,
 )
+from basketball_cv.player_gaps import interpolate_player_gaps, smooth_player_positions
 from basketball_cv.teams import (
     UNKNOWN_TEAM,
     bgr_to_hsv,
@@ -202,6 +203,8 @@ def main() -> None:
             max_appearance_motion_penalty_m=args.crossing_max_appearance_motion_penalty,
         )
         stitch_report = summarize_players_from_records(records, stitch_report, crossing_report)
+    gap_report = interpolate_player_gaps(records, fps=fps, max_gap_frames=max(2, int(round(0.32 * fps))))
+    smooth_player_positions(records, window=5)
     mark_in_play_players(records, max_players=args.in_play_players)
     update_track_report_in_play(track_report, records)
     ball_interpolation_report = interpolate_ball_gaps(records, fps)
@@ -250,6 +253,8 @@ def main() -> None:
             "stitched_players": stitch_report["player_count"],
             "merged_track_fragments": stitch_report["merged_track_count"],
             "id_switch_corrections": crossing_report["correction_count"],
+            "short_gap_fills": gap_report["short_gap_fills"],
+            "estimated_player_frames": gap_report["estimated_player_frames"],
             "total_person_tracks": track_report["track_count"],
             "pick_and_roll_candidates": len(pick_and_roll_events),
             "calibrated": homography is not None,
@@ -753,8 +758,10 @@ def draw_frame(
         cv2.putText(frame, label, (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
         cv2.putText(frame, label, (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
 
-        if minimap is not None and rec["court_x"] is not None and rec["court_y"] is not None:
-            pt = court_to_canvas(np.asarray([[rec["court_x"], rec["court_y"]]], dtype=np.float32), court_spec, pixels_per_meter=24, margin_px=18)[0]
+        map_x = rec.get("court_x_smooth", rec.get("court_x"))
+        map_y = rec.get("court_y_smooth", rec.get("court_y"))
+        if minimap is not None and map_x is not None and map_y is not None:
+            pt = court_to_canvas(np.asarray([[map_x, map_y]], dtype=np.float32), court_spec, pixels_per_meter=24, margin_px=18)[0]
             radius = 6 if rec["class_name"] == "person" else 4
             cv2.circle(minimap, (int(pt[0]), int(pt[1])), radius, color, -1)
             label_id = rec.get("jersey_number") or (rec.get("player_id") if rec.get("player_id") is not None else rec.get("track_id"))
